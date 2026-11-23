@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+<title>Jarvis</title>
+<style>
+/* ========================================================================
+   JARVIS — 100% transparent terminal + orb
+   No card, no border, no panel in the default view. Text floats on the
+   desktop and the orb floats above it. Clicking the orb steps "inside".
+   ======================================================================== */
+:root {
+  --accent: #7fb4d8;
+  --accent-rgb: 127, 180, 216;
+
+  --ok-rgb: 120, 200, 170;
+  --warn-rgb: 230, 190, 110;
+  --bad-rgb: 224, 120, 130;
+  --think-rgb: 157, 183, 255;
+
+  --silver: #eaf3fb;          /* Jarvis speech */
+  --steel: #b3cadc;           /* labels */
+  --me: #9dbdd6;              /* what I typed */
+  --dim: #7a9ab3;             /* meta */
+  --faint: #5d7d95;           /* hints */
+
+  --line: rgba(170, 200, 225, .10);
+
+  --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+  --fs: calc(13px * var(--font-scale, 1));
+  --fs-sm: calc(11.5px * var(--font-scale, 1));
+  --fs-xs: calc(10px * var(--font-scale, 1));
+  --fs-md: calc(14px * var(--font-scale, 1));
+
+  --orb-size: 128px;
+  --ease: cubic-bezier(.2, .9, .3, 1);
+
+  /* legibility on any wallpaper, without a background box */
+  --ink-shadow: 0 1px 2px rgba(0, 0, 0, .95), 0 0 10px rgba(0, 0, 0, .85), 0 0 24px rgba(0, 0, 0, .6);
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; height: 100%; overflow: hidden;
+  background: transparent;
+  font-family: var(--mono);
+  color: var(--silver);
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+button { font: inherit; color: inherit; }
+
+#galaxy {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  opacity: 0; pointer-events: none;
+  /* the galaxy is born out of the orb */
+  transform: scale(.10);
+  transform-origin: 50% 16%;
+  transition: opacity .5s ease, transform .95s cubic-bezier(.16,.9,.24,1);
+  will-change: transform, opacity;
+}
+body.mode-inside #galaxy { opacity: 1; transform: scale(1) }
+
+#shell {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  /* no background, no border, no shadow — glass only */
+  background: none;
+}
+
+/* ========================================================================
+   STATUS LINE — thin floating text
+   ======================================================================== */
+/* invisible drag strip along the very top */
+#bar {
+  flex: none; height: 22px;
+  cursor: grab;
+  z-index: 7;
+}
+#bar:active { cursor: grabbing }
+
+/* JARVIS · ONLINE · CPU · RAM · GPU, right under the orb */
+#status {
+  flex: none;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 6px 0 2px;
+  font-size: var(--fs-xs); letter-spacing: .16em;
+  color: var(--dim);
+  text-shadow: var(--ink-shadow);
+  transition: opacity .3s ease;
+}
+#status .brand {
+  color: var(--accent); font-weight: 700; letter-spacing: .30em;
+  text-shadow: 0 0 14px rgba(var(--accent-rgb), .85), var(--ink-shadow);
+}
+#status .d { color: var(--faint) }
+#status b { color: var(--steel); font-weight: 500; letter-spacing: .06em }
+#status .stat { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap }
+
+#dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 9px rgba(var(--accent-rgb), 1);
+  transition: background .3s, box-shadow .3s;
+}
+#dot[data-s="thinking"] { background: rgb(var(--think-rgb)); box-shadow: 0 0 10px rgba(var(--think-rgb), 1); animation: pulse 1s ease-in-out infinite }
+#dot[data-s="listening"] { background: #d6e8f6; box-shadow: 0 0 10px rgba(214, 232, 246, 1) }
+#dot[data-s="done"] { background: rgb(var(--ok-rgb)); box-shadow: 0 0 10px rgba(var(--ok-rgb), 1) }
+#dot[data-s="error"] { background: rgb(var(--bad-rgb)); box-shadow: 0 0 10px rgba(var(--bad-rgb), 1) }
+@keyframes pulse { 50% { opacity: .25; transform: scale(.7) } }
+
+/* ========================================================================
+   ORB
+   ======================================================================== */
+#stage {
+  flex: none;
+  height: calc(var(--orb-size) + 18px);
+  display: grid; place-items: center;
+  position: relative;
+  cursor: grab; z-index: 6;
+  transition: opacity .35s ease, transform .45s var(--ease);
+}
+#stage:active { cursor: grabbing }
+body.mode-inside #stage { opacity: 0; pointer-events: none; display: none }
+body.mode-inside #status { opacity: 0; pointer-events: none }
+body.mode-inside #stack { justify-content: flex-end }
+body.mode-inside #thread { display: none }
+
+#orb {
+  width: var(--orb-size); height: var(--orb-size);
+  display: block;
+  filter: drop-shadow(0 0 22px rgba(var(--accent-rgb), .45));
+}
+#orb-hint {
+  position: absolute; bottom: -2px; left: 50%; transform: translateX(-50%);
+  font-size: var(--fs-xs); letter-spacing: .22em; text-transform: uppercase;
+  color: var(--dim); text-shadow: var(--ink-shadow);
+  opacity: 0; transition: opacity .2s ease; white-space: nowrap;
+}
+#stage:hover #orb-hint { opacity: .95 }
+body.mode-inside #orb-hint { opacity: 0 }
+
+/* ========================================================================
+   THREAD — text on the desktop
+   ======================================================================== */
+#stack {
+  flex: 1 1 auto; min-height: 0;
+  width: 100%;
+  display: flex; flex-direction: column;
+  justify-content: flex-start; align-items: center;
+  overflow: visible;
+}
+#stack > div, #stack > main, #stack > form { flex: none }
+#stack-inner { display: none }
+#thread {
+  flex: 0 1 auto; min-height: 0;
+  max-height: calc(100vh - 280px);
+  width: min(780px, calc(100% - 40px));
+  margin: 0 auto;
+  overflow-y: auto; overflow-x: hidden;
+  padding: 6px 10px 8px;
+  display: flex; flex-direction: column; gap: 1px;
+  font-size: var(--fs); line-height: 1.72;
+  user-select: text; cursor: text;
+  scrollbar-width: none;
+  z-index: 3;
+  text-shadow: var(--ink-shadow);
+}
+#thread::-webkit-scrollbar { width: 0 }
+#inputbar { width: min(780px, 100%); margin: 0 auto }
+#alerts { width: min(780px, calc(100% - 40px)); margin: 0 auto 8px }
+
+.turn { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word }
+.turn.me {
+  color: var(--me);
+  padding-left: 16px; position: relative;
+  margin-top: 14px;
+}
+.turn.me::before { content: "›"; position: absolute; left: 0; color: rgba(var(--accent-rgb), .9) }
+.turn.bot {
+  color: var(--silver);
+  padding-left: 16px; position: relative;
+  margin: 3px 0;
+  animation: fadein .24s ease both;
+  cursor: copy;
+}
+.turn.bot::before {
+  content: ""; position: absolute; left: 3px; top: .74em;
+  width: 3px; height: 3px; border-radius: 50%;
+  background: rgba(var(--accent-rgb), .95);
+  box-shadow: 0 0 9px rgba(var(--accent-rgb), .95);
+}
+.turn.bot.bad { color: #f6b3bc }
+.turn.bot.bad::before { background: rgb(var(--bad-rgb)); box-shadow: 0 0 9px rgba(var(--bad-rgb), .9) }
+.turn.bot.copied { color: rgb(var(--ok-rgb)) }
+.turn.bot.typing::after {
+  content: "▍"; margin-left: 1px; color: var(--accent);
+  animation: blink 1s steps(1) infinite;
+}
+.turn.sys {
+  color: var(--dim); font-size: var(--fs-xs);
+  letter-spacing: .12em; text-transform: uppercase;
+  padding: 10px 0 2px;
+}
+.turn.sys.plain { text-transform: none; letter-spacing: .02em; font-size: var(--fs-sm) }
+@keyframes fadein { from { opacity: 0; transform: translateY(2px) } }
+@keyframes blink { 50% { opacity: 0 } }
+
+.approve { display: flex; gap: 8px; align-items: center; padding: 8px 0 2px 16px }
+.approve button {
+  background: rgba(10, 20, 30, .55);
+  border: 1px solid rgba(var(--accent-rgb), .40);
+  color: var(--steel); border-radius: 9px;
+  font-size: var(--fs-xs); letter-spacing: .12em; text-transform: uppercase;
+  padding: 5px 11px; cursor: pointer; transition: .15s;
+  text-shadow: var(--ink-shadow);
+  backdrop-filter: blur(4px);
+}
+.approve button:hover { background: rgba(var(--accent-rgb), .3); color: #fff }
+.approve button.ghost { border-color: rgba(170, 200, 225, .25); color: var(--dim); background: rgba(8, 14, 20, .45) }
+
+/* ========================================================================
+   INPUT — a prompt line, floating
+   ======================================================================== */
+#inputbar {
+  flex: none; display: flex; align-items: center; gap: 10px;
+  padding: 10px 20px 22px;
+  z-index: 4;
+  text-shadow: var(--ink-shadow);
+  transition: opacity .25s ease;
+}
+#inputbar .prompt {
+  color: var(--accent); font-size: calc(15px * var(--font-scale, 1));
+  text-shadow: 0 0 14px rgba(var(--accent-rgb), .95), var(--ink-shadow);
+  animation: promptglow 3.8s ease-in-out infinite;
+}
+@keyframes promptglow { 50% { text-shadow: 0 0 22px rgba(var(--accent-rgb), 1), var(--ink-shadow) } }
+
+.field { position: relative; flex: 1 1 auto; display: flex; align-items: center; min-width: 0 }
+#input {
+  width: 100%; background: transparent; border: 0; outline: 0;
+  color: var(--silver); font-family: var(--mono); font-size: var(--fs-md);
+  padding: 0; caret-color: var(--accent);
+  user-select: text; text-shadow: var(--ink-shadow);
+}
+#input::placeholder { color: var(--faint); text-shadow: var(--ink-shadow) }
+#caret {
+  position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+  color: var(--accent); font-size: var(--fs-md); pointer-events: none;
+  animation: blink 1.1s steps(1) infinite;
+  display: none;
+  text-shadow: 0 0 12px rgba(var(--accent-rgb), 1);
+}
+.field.idle #caret { display: block }
+.field.idle #input::placeholder { opacity: 0 }
+
+/* ========================================================================
+   RAIL — only inside
+   ======================================================================== */
+#rail {
+  position: absolute; top: 46px; right: 12px; bottom: 70px; width: 38px;
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding-top: 8px; z-index: 8;
+  opacity: 0; pointer-events: none;
+  transform: translateX(10px);
+  transition: opacity .4s ease, transform .45s var(--ease);
+}
+body.mode-inside #rail { opacity: 1; pointer-events: auto; transform: none }
+
+.rbtn {
+  position: relative; width: 34px; height: 34px; padding: 0;
+  display: grid; place-items: center;
+  background: transparent; border: 0; border-radius: 12px;
+  color: var(--steel); opacity: .6; cursor: pointer;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .9));
+  transition: opacity .18s, color .18s, background .18s, box-shadow .25s, transform .18s var(--ease);
+}
+.rbtn svg {
+  width: 17px; height: 17px; stroke: currentColor; fill: none;
+  stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round;
+  transition: transform .25s var(--ease);
+}
+.rbtn:hover { opacity: 1; color: #f2f8fd; background: rgba(var(--accent-rgb), .16); box-shadow: 0 0 22px -6px rgba(var(--accent-rgb), 1) }
+.rbtn:hover svg { transform: scale(1.08) }
+.rbtn:active { transform: scale(.94) }
+.rbtn.on { opacity: 1; color: var(--accent); background: rgba(var(--accent-rgb), .18) }
+.rbtn.press { transform: scale(1.7); filter: drop-shadow(0 0 14px rgba(var(--accent-rgb), 1)); transition: transform .26s ease-out, filter .26s ease-out }
+.rbtn.on svg { filter: drop-shadow(0 0 6px rgba(var(--accent-rgb), 1)) }
+.rbtn.on::after {
+  content: ""; position: absolute; inset: 0; border-radius: 9px;
+  border: 1px solid rgba(var(--accent-rgb), .5);
+  animation: ring 2.2s ease-out infinite;
+}
+@keyframes ring { 0% { transform: scale(.9); opacity: .8 } 100% { transform: scale(1.18); opacity: 0 } }
+.rbtn .lab {
+  position: absolute; right: 40px; top: 50%;
+  transform: translate(4px, -50%);
+  font-size: var(--fs-xs); letter-spacing: .16em; text-transform: uppercase;
+  color: var(--steel); background: rgba(6, 12, 18, .82);
+  border: 1px solid var(--line); border-radius: 5px;
+  padding: 3px 7px; white-space: nowrap;
+  opacity: 0; pointer-events: none;
+  transition: opacity .16s, transform .16s var(--ease);
+  backdrop-filter: blur(6px);
+}
+.rbtn:hover .lab { opacity: 1; transform: translate(0, -50%) }
+.rbtn.sep { margin-top: 10px }
+.rbtn.sep::before {
+  content: ""; position: absolute; top: -6px; left: 8px; right: 8px; height: 1px;
+  background: var(--line);
+}
+
+/* ========================================================================
+   DRAWER — glass over the galaxy
+   ======================================================================== */
+#drawer {
+  position: absolute; top: 38px; bottom: 66px; left: 20px; right: 60px;
+  max-width: 1060px; margin-inline: auto;
+  display: flex; flex-direction: column;
+  border-radius: 30px;
+  background: rgba(0, 0, 0, .34);
+  backdrop-filter: blur(22px) saturate(120%);
+  box-shadow: 0 40px 90px -44px rgba(0, 0, 0, .95), inset 0 0 0 1px rgba(255, 255, 255, .10);
+  backdrop-filter: blur(30px) saturate(150%);
+  opacity: 0; transform: translateX(26px) scale(.96);
+  transform-origin: 100% 18%;
+  pointer-events: none; overflow: hidden;
+  transition: opacity .26s ease, transform .3s var(--ease);
+  z-index: 9;
+}
+#drawer.open { opacity: 1; transform: none; pointer-events: auto }
+
+.phead {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  height: 36px; padding: 0 10px 0 18px;
+  font-size: var(--fs-xs); letter-spacing: .28em; text-transform: uppercase;
+  color: var(--accent); text-shadow: 0 0 14px rgba(var(--accent-rgb), .6);
+}
+.phead .spacer { flex: 1 }
+.iconbtn {
+  width: 24px; height: 24px; display: grid; place-items: center;
+  background: transparent; border: 0; border-radius: 9px;
+  color: var(--dim); cursor: pointer; transition: .15s;
+}
+.iconbtn svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round }
+.iconbtn:hover { color: var(--silver); background: rgba(var(--accent-rgb), .14) }
+
+.pbody {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column;
+  padding: 2px 18px 22px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(var(--accent-rgb), .28) transparent;
+}
+.pbody::-webkit-scrollbar { width: 5px }
+.pbody::-webkit-scrollbar-thumb { background: rgba(var(--accent-rgb), .26); border-radius: 3px }
+
+.panel { display: none }
+.panel.active { display: block; flex: 1 1 auto; min-height: 0; animation: panelin .28s var(--ease) both }
+@keyframes panelin { from { opacity: 0; transform: translateY(7px) } }
+
+/* ========================================================================
+   CARDS — dashboard only
+   ======================================================================== */
+.cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px }
+@media (max-width: 899px) {
+  .cards .card.wide, .cards .card.wide-sm { grid-column: auto }
+  .cards { gap: 8px; margin-top: 6px }
+  .card { padding: 10px 12px 11px; border-radius: 15px }
+  .card-h { margin-bottom: 7px }
+  .bignum { font-size: calc(26px * var(--font-scale, 1)) }
+  .wday { padding-top: 2px }
+  .meters { gap: 6px; margin-top: 10px }
+  .gauges { margin-top: 6px }
+  .gauges.tight { gap: 22px }
+  .detail { margin-top: 10px; line-height: 1.5 }
+}
+@media (min-width: 900px) {
+  .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px }
+  .card { padding: 16px 18px 17px }
+  .card-h { margin-bottom: 12px }
+  .bignum { font-size: calc(44px * var(--font-scale, 1)) }
+  .gauges { gap: 46px }
+  #drawer { left: 70px; right: 70px }
+  .panel { max-width: none }
+  .gauges.tight { gap: 46px }
+}
+.card {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, .06), rgba(255, 255, 255, .015)),
+    rgba(8, 14, 22, .30);
+  backdrop-filter: blur(14px) saturate(130%);
+  border: 1px solid rgba(170, 200, 225, .16);
+  border-radius: 20px; padding: 14px 15px 15px;
+  min-width: 0;
+  backdrop-filter: blur(6px);
+  animation: cardin .3s var(--ease) both;
+  transition: border-color .2s, box-shadow .25s;
+}
+.card:hover {
+  border-color: rgba(var(--accent-rgb), .38);
+  box-shadow: 0 0 36px -16px rgba(var(--accent-rgb), 1), inset 0 1px 0 rgba(255, 255, 255, .07);
+  transform: translateY(-1px);
+}
+.card { transition: border-color .2s, box-shadow .25s, transform .25s var(--ease) }
+.card.wide { grid-column: 1 / -1 }
+@keyframes cardin { from { opacity: 0; transform: translateY(9px) } }
+.card-h {
+  font-size: var(--fs-xs); letter-spacing: .22em; text-transform: uppercase;
+  color: var(--dim); margin-bottom: 10px;
+  display: flex; align-items: center; gap: 6px;
+}
+.card-h::after { content: ""; flex: 1; height: 1px; background: var(--line) }
+
+.bignum { font-size: calc(32px * var(--font-scale, 1)); line-height: 1.1; color: var(--silver); letter-spacing: -.02em }
+.bignum em { font-style: normal; font-size: .45em; color: var(--dim); margin-left: 2px }
+.wmeta { font-size: var(--fs-sm); color: var(--dim); margin-top: 5px; overflow-wrap: anywhere }
+
+.row { display: flex; gap: 6px; align-items: center; flex-wrap: nowrap; min-width: 0 }
+.row + .row { margin-top: 7px }
+.inp {
+  flex: 1 1 auto; min-width: 0;
+  background: rgba(10, 20, 30, .35); border: 1px solid var(--line);
+  border-radius: 10px; color: var(--silver);
+  font-family: var(--mono); font-size: var(--fs-sm);
+  padding: 5px 9px; outline: 0; user-select: text;
+  transition: border-color .15s, background .15s;
+}
+.inp:focus { border-color: rgba(var(--accent-rgb), .55); background: rgba(var(--accent-rgb), .10) }
+.inp::placeholder { color: var(--faint) }
+
+.tbtn {
+  flex: none;
+  background: rgba(var(--accent-rgb), .12); border: 1px solid rgba(var(--accent-rgb), .28);
+  border-radius: 10px; color: var(--steel);
+  font-size: var(--fs-xs); letter-spacing: .14em; text-transform: uppercase;
+  padding: 6px 12px; cursor: pointer; transition: .15s; white-space: nowrap;
+}
+.tbtn:hover { background: rgba(var(--accent-rgb), .26); color: #fff; border-color: rgba(var(--accent-rgb), .55) }
+.tbtn:active { transform: scale(.97) }
+.tbtn.sm { padding: 5px 8px }
+.tbtn.off { opacity: .4 }
+.tbtn.primary {
+  background: rgba(var(--accent-rgb), .26); color: #f2f9ff;
+  border-color: rgba(var(--accent-rgb), .55);
+  box-shadow: 0 0 22px -8px rgba(var(--accent-rgb), 1);
+}
+.tbtn.primary:hover { background: rgba(var(--accent-rgb), .38) }
+
+
+/* ---- system dashboard: one composed surface, no cards ---- */
+.sys { display: flex; flex-direction: column; height: 100%; }
+
+.dhead {
+  display: flex; align-items: flex-end; gap: 16px;
+  padding: 4px 2px 16px;
+  border-bottom: 1px solid rgba(190, 225, 255, .10);
+}
+.dtime {
+  font-size: calc(46px * var(--font-scale, 1)); line-height: .92;
+  letter-spacing: -.035em; color: #f3f9fe;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 30px rgba(var(--accent-rgb), .28);
+}
+.dmeta { display: flex; flex-direction: column; gap: 5px; padding-bottom: 5px }
+.ddate { font-size: var(--fs-sm); color: var(--dim) }
+.dlive { display: flex; align-items: center; gap: 6px; font-size: 9px; letter-spacing: .2em; color: var(--accent) }
+.dlive i {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 10px rgba(var(--accent-rgb), 1);
+  animation: pulse 2.6s ease-in-out infinite;
+}
+.dspacer { flex: 1 }
+.dhint { font-size: 9px; letter-spacing: .06em; color: var(--faint); padding-bottom: 4px; text-align: right }
+
+.drings {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  padding: 20px 0 18px;
+  border-bottom: 1px solid rgba(190, 225, 255, .10);
+}
+.drings .gwrap { padding: 2px 0; border-left: 1px solid rgba(190, 225, 255, .07) }
+.drings .gwrap:first-child { border-left: 0 }
+.drings .gring, .drings .gring svg { width: 92px; height: 92px }
+.drings .gring .gval { font-size: calc(15px * var(--font-scale, 1)) }
+.drings .glab { margin-top: 4px }
+
+.dbars {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 22px;
+  padding: 18px 2px;
+  border-bottom: 1px solid rgba(190, 225, 255, .10);
+}
+.dbars .meter .mh { margin-bottom: 5px }
+.dbars .bar { height: 5px }
+
+.dlog {
+  flex: 1 1 auto; min-height: 90px;
+  margin: 18px 0 0; padding: 15px 17px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, .035);
+  border: 1px solid rgba(190, 225, 255, .075);
+  font-family: var(--mono); font-size: var(--fs-sm); line-height: 1.75;
+  color: var(--steel); white-space: pre-wrap; overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* ---- gauges ---- */
+.gauges { display: flex; gap: 14px; justify-content: space-between; margin: 10px 0 0 }
+.gauges.tight { justify-content: flex-start; gap: 28px }
+.gwrap { display: flex; flex-direction: column; align-items: center; gap: 6px; flex: none }
+.gring { position: relative; width: 84px; height: 84px }
+.gring svg { width: 84px; height: 84px; transform: rotate(-90deg); display: block }
+.gring .trk { fill: none; stroke: rgba(170, 200, 225, .14); stroke-width: 4 }
+.gring .val {
+  fill: none; stroke: var(--accent); stroke-width: 4; stroke-linecap: round;
+  stroke-dasharray: 163.4; stroke-dashoffset: 163.4;
+  transition: stroke-dashoffset .6s var(--ease), stroke .3s;
+  filter: drop-shadow(0 0 6px rgba(var(--accent-rgb), .8));
+}
+.gring .gval {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  font-size: calc(13px * var(--font-scale, 1)); color: var(--silver); letter-spacing: -.02em;
+}
+.gwrap .glab { font-size: var(--fs-xs); letter-spacing: .18em; color: var(--dim); text-transform: uppercase }
+.gwrap.warm .val { stroke: rgb(var(--warn-rgb)); filter: drop-shadow(0 0 6px rgba(var(--warn-rgb), .8)) }
+.gwrap.hot .val { stroke: rgb(var(--bad-rgb)); filter: drop-shadow(0 0 7px rgba(var(--bad-rgb), .9)) }
+.gauges.tight .gring, .gauges.tight .gring svg { width: 66px; height: 66px }
+.gauges.tight .gring .gval { font-size: calc(11.5px * var(--font-scale, 1)) }
+
+/* ---- meters ---- */
+.meters { display: flex; flex-direction: column; gap: 8px; margin-top: 18px }
+.meter { display: flex; flex-direction: column; gap: 4px }
+.meter .mh { display: flex; justify-content: space-between; font-size: var(--fs-xs); color: var(--dim); letter-spacing: .1em }
+.meter .mh b { color: var(--steel); font-weight: 500; letter-spacing: .02em }
+.bar { height: 4px; border-radius: 2px; background: rgba(170, 200, 225, .14); overflow: hidden }
+.bar i {
+  display: block; height: 100%; width: 0;
+  background: linear-gradient(90deg, rgba(var(--accent-rgb), .55), var(--accent));
+  box-shadow: 0 0 12px rgba(var(--accent-rgb), .7);
+  transition: width .55s var(--ease), background .3s;
+}
+.bar.warm i { background: linear-gradient(90deg, rgba(var(--warn-rgb), .5), rgb(var(--warn-rgb))) }
+.bar.hot i { background: linear-gradient(90deg, rgba(var(--bad-rgb), .5), rgb(var(--bad-rgb))) }
+
+/* ---- sparkline ---- */
+.spark { margin: 20px 0 0 }
+.spark-head {
+  display: flex; justify-content: space-between;
+  font-size: var(--fs-xs); letter-spacing: .16em; color: var(--faint); margin-bottom: 5px;
+}
+.spark svg { width: 100%; height: 46px; display: block; overflow: visible }
+.spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.2; stroke-linejoin: round; stroke-linecap: round; filter: drop-shadow(0 0 5px rgba(var(--accent-rgb), .8)) }
+.spark .fillp { fill: url(#sparkgrad); stroke: none }
+
+.detail {
+  margin: 16px 0 0; font-family: var(--mono); font-size: var(--fs-sm);
+  color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere;
+  user-select: text; line-height: 1.68;
+}
+
+/* ---- settings ---- */
+.setting { margin-top: 14px }
+.setting > label {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: var(--fs-xs); letter-spacing: .18em; text-transform: uppercase;
+  color: var(--dim); margin-bottom: 8px;
+}
+.setting > label b { color: var(--accent); font-weight: 500; letter-spacing: .02em; text-transform: none }
+input[type="range"] {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 4px; border-radius: 2px;
+  background: rgba(170, 200, 225, .2); outline: 0; cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 11px; height: 11px; border-radius: 50%;
+  background: var(--accent); border: 0; box-shadow: 0 0 12px rgba(var(--accent-rgb), 1); cursor: pointer;
+}
+.colorrow { display: flex; gap: 7px; align-items: center }
+.colorrow input[type="color"] {
+  width: 30px; height: 27px; padding: 0; border: 1px solid var(--line);
+  border-radius: 9px; background: transparent; cursor: pointer;
+}
+.colorrow .inp { flex: 1 }
+
+.swrow {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 0; border-bottom: 1px solid rgba(255, 255, 255, .055);
+  font-size: var(--fs-sm); color: var(--steel); cursor: pointer;
+}
+.swrow small { display: block; color: var(--dim); font-size: var(--fs-xs); margin-top: 2px; letter-spacing: .04em }
+.sw {
+  flex: none; width: 32px; height: 17px; padding: 0; border-radius: 9px;
+  background: rgba(170, 200, 225, .18); border: 0; cursor: pointer;
+  position: relative; transition: background .2s;
+}
+.sw i {
+  position: absolute; top: 2px; left: 2px; width: 13px; height: 13px;
+  border-radius: 50%; background: #93adc1;
+  transition: transform .2s var(--ease), background .2s, box-shadow .2s;
+}
+.sw[aria-pressed="true"] { background: rgba(var(--accent-rgb), .45) }
+.sw[aria-pressed="true"] i { transform: translateX(15px); background: #f0f8ff; box-shadow: 0 0 9px rgba(var(--accent-rgb), 1) }
+
+#memlist { margin: 8px 0 12px; padding: 0; list-style: none; font-size: var(--fs-sm); color: var(--dim) }
+#memlist li { padding: 3px 0 3px 11px; position: relative; overflow-wrap: anywhere }
+#memlist li::before { content: "·"; position: absolute; left: 2px; color: var(--accent) }
+
+/* ---- alerts ---- */
+#alerts {
+  flex: none; margin: 0 20px 8px; padding: 8px 11px;
+  background: rgba(40, 30, 12, .55);
+  border-left: 2px solid rgb(var(--warn-rgb));
+  border-radius: 0 6px 6px 0;
+  font-size: var(--fs-sm); color: #f4dfb4; overflow-wrap: anywhere;
+  text-shadow: var(--ink-shadow);
+  backdrop-filter: blur(6px);
+  animation: fadein .25s ease both;
+  z-index: 4;
+}
+#alerts[hidden] { display: none }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important }
+}
+</style>
+</head>
+<body class="mode-orb">
+<canvas id="galaxy"></canvas>
+
+<div id="shell">
+  <header id="bar" class="hit" aria-hidden="true"></header>
+
+  <div id="stack">
+  <div id="stage" class="hit" title="Drag to move · click to step inside">
+    <canvas id="orb" width="276" height="276"></canvas>
+    <div id="orb-hint">enter</div>
+  </div>
+
+  <div id="status">
+    <span class="brand">JARVIS</span>
+    <span class="d">·</span>
+    <span class="stat"><i id="dot" data-s="idle"></i><span id="state-txt">ONLINE</span></span>
+    <span class="d">·</span>
+    <span class="stat">CPU <b id="v-cpu">--</b></span>
+    <span class="d">·</span>
+    <span class="stat">RAM <b id="v-ram">--</b></span>
+    <span class="d">·</span>
+    <span class="stat">GPU <b id="v-gpu">--</b></span>
+  </div>
+
+  <main id="thread" class="hit"></main>
+
+  <div id="alerts" hidden></div>
+
+  <form id="inputbar" class="hit" autocomplete="off">
+    <span class="prompt">›</span>
+    <div class="field idle" id="field">
+      <input id="input" type="text" spellcheck="false" placeholder="ask anything" />
+      <span id="caret" aria-hidden="true">▍</span>
+    </div>
+  </form>
+  </div>
+
+  <nav id="rail" class="hit">
+    <button class="rbtn" data-panel="dashboard" aria-label="Dashboard">
+      <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7.5" height="7.5" rx="1.6"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.6"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.6"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.6"/></svg>
+      <span class="lab">Dashboard</span>
+    </button>
+    <button class="rbtn" data-panel="hardware" aria-label="Hardware">
+      <svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>
+      <span class="lab">Hardware</span>
+    </button>
+    <button class="rbtn sep" data-panel="attach" aria-label="Attach">
+      <svg viewBox="0 0 24 24"><path d="M20.5 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.9-8.9a3.7 3.7 0 0 1 5.2 5.2l-8.9 8.9a1.9 1.9 0 0 1-2.6-2.6l8.2-8.2"/></svg>
+      <span class="lab">Attach</span>
+    </button>
+    <button class="rbtn" data-panel="voice" aria-label="Voice">
+      <svg viewBox="0 0 24 24"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5M8.5 21.5h7"/></svg>
+      <span class="lab">Read aloud</span>
+    </button>
+    <button class="rbtn" data-panel="settings" aria-label="Settings">
+      <svg viewBox="0 0 24 24"><path d="M21 5h-6M9 5H3M21 12h-4M11 12H3M21 19h-8M9 19H3"/><circle cx="12" cy="5" r="2.2"/><circle cx="14" cy="12" r="2.2"/><circle cx="11" cy="19" r="2.2"/></svg>
+      <span class="lab">Settings</span>
+    </button>
+    <button class="rbtn sep" data-panel="exit" aria-label="Back to orb">
+      <svg viewBox="0 0 24 24"><path d="M19 12H5M11 18l-6-6 6-6"/></svg>
+      <span class="lab">Back</span>
+    </button>
+  </nav>
+
+  <section id="drawer" class="hit" aria-hidden="true">
+    <div class="phead"><span id="ptitle">DASHBOARD</span><span class="spacer"></span>
+      <button class="iconbtn" id="drawer-close" aria-label="Close">
+        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="pbody">
+
+
+      <!-- -------------------------------------------- dashboard -->
+      <section class="panel" data-p="dashboard">
+        <div class="sys">
+          <div class="dhead">
+            <div class="dlive"><i></i><span>LIVE TELEMETRY</span></div>
+            <div class="dspacer"></div>
+            <div class="dhint">clock, weather and music live in the notch</div>
+          </div>
+
+          <div class="drings" id="d-gauges"></div>
+
+          <div class="dbars" id="d-meters"></div>
+
+          <pre class="dlog" id="hw-out">reading hardware…</pre>
+        </div>
+      </section>
+
+      <!-- --------------------------------------------- hardware -->
+      <section class="panel" data-p="hardware">
+        <div class="gauges" id="h-gauges"></div>
+        <div class="spark">
+          <div class="spark-head"><span>CPU HISTORY</span><span>60s</span></div>
+          <svg viewBox="0 0 300 46" preserveAspectRatio="none" aria-hidden="true">
+            <defs>
+              <linearGradient id="sparkgrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="rgba(127,180,216,.30)" />
+                <stop offset="1" stop-color="rgba(127,180,216,0)" />
+              </linearGradient>
+            </defs>
+            <polygon class="fillp" id="spark-fill" points="" />
+            <polyline id="spark-line" points="" />
+          </svg>
+        </div>
+        <div class="meters" id="h-meters"></div>
+        <pre class="detail" id="hw-detail">reading hardware…</pre>
+        <div class="row" style="margin-top:14px"><button class="tbtn" id="hw-go">Refresh</button></div>
+      </section>
+
+      <!-- --------------------------------------------- settings -->
+      <section class="panel" data-p="settings">
+        <div class="swrow"><span>Proxy tunnel<small>Jarvis only, 127.0.0.1:2080</small></span><button class="sw" id="t-net" aria-pressed="false"><i></i></button></div>
+        <div class="swrow"><span>Local only<small>no internet, small local model</small></span><button class="sw" id="t-local" aria-pressed="false"><i></i></button></div>
+        <div class="swrow"><span>Learning<small>remember facts you tell me</small></span><button class="sw" id="t-mem" aria-pressed="true"><i></i></button></div>
+        <div class="swrow"><span>Health watch<small>quiet background monitor</small></span><button class="sw" id="t-mon" aria-pressed="true"><i></i></button></div>
+        <div class="swrow"><span>Activity<small>count mouse use and app, nothing else</small></span><button class="sw" id="t-act" aria-pressed="false"><i></i></button></div>
+
+        <div class="setting">
+          <label>Accent colour <b id="v-accent">#7fb4d8</b></label>
+          <div class="colorrow">
+            <input type="color" id="s-accent" value="#7fb4d8" />
+            <input type="text" id="s-accent-hex" class="inp" placeholder="#7fb4d8" />
+          </div>
+        </div>
+        <div class="setting">
+          <label>Text scale <b id="v-font">1.00×</b></label>
+          <input type="range" id="s-font" min="0.85" max="1.35" step="0.01" />
+        </div>
+        <div class="setting">
+          <label>Orb size <b id="v-orb">128px</b></label>
+          <input type="range" id="s-orb" min="88" max="200" step="4" />
+        </div>
+        <div class="setting">
+          <label>Auto-hide <b id="v-autohide">45s</b></label>
+          <input type="range" id="s-autohide" min="0" max="120" step="5" />
+        </div>
+        <div class="setting">
+          <label>What I learned about you</label>
+          <ul id="memlist"></ul>
+          <button class="tbtn" id="mem-clear">Forget everything</button>
+        </div>
+      </section>
+
+    </div>
+  </section>
+</div>
+
+<script type="module" src="./renderer.mjs"></script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+# dependencies
+node_modules/
+
+# personal + runtime state (never commit these)
+data/
+session.json
+brief.json
+orb.log
+*.log
+
+# dev backups
+*.bak
+*.pre-*.js
+*.pre-*.mjs
+*.old.html
+*.old.mjs
+index.v2.bak
+notch.v1.bak
+
+# scratch
+*.tmp
+*.png

@@ -1,0 +1,21 @@
+{
+  "name": "jarvis-orb",
+  "version": "1.0.0",
+  "description": "Floating Jarvis orb that talks to Hermes Agent",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/",
+    "stress": "node tests/stress.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "electron": "^45.4.1"
+  },
+  "dependencies": {
+    "three": "^0.187.0"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "startAtLogin": true,
+  "startHidden": true,
+  "autoHideSeconds": 45,
+  "uiScale": 1,
+  "briefOnStart": true,
+  "briefEveryHours": 8,
+  "briefPrompt": "Startup brief. Run the system-health skill (python \"C:/Users/you/AppData/Local/hermes/skills/productivity/system-health/scripts/hw.py\" --pretty) and read the result. Then reply with at most 4 short lines, no preamble and no headings: (1) machine health in one line, flagging anything actually alarming about CPU, RAM or disk; (2) anything still pending that you know about from memory or cron jobs; (3) one concrete suggestion for what I should do next. Keep it under 60 words total.",
+  "allowRemoteDebug": false,
+  "theme": {
+    "accent": "#7fb4d8",
+    "panelOpacity": 0.94,
+    "panelWidth": 0,
+    "orbSize": 128,
+    "fontScale": 1,
+    "autoHideSeconds": 45
+  },
+  "netMode": "direct",
+  "preferLocal": false,
+  "monitorOn": false
+}
