@@ -1013,7 +1013,17 @@ app.whenReady().then(() => {
 })
 
 /* A tray app never exits when a window closes. */
-app.on('window-all-closed', (e) => { if (e && e.preventDefault) e.preventDefault() })
+app.on('window-all-closed', (e) => {
+  console.log('[lifecycle] window-all-closed (ignored)')
+  if (e && e.preventDefault) e.preventDefault()
+})
+
+/* If it ever disappears on its own, these lines say why. */
+app.on('before-quit', () => console.log('[lifecycle] before-quit'))
+app.on('render-process-gone', (_e, wc, d) => console.log('[lifecycle] renderer gone:', JSON.stringify(d)))
+app.on('child-process-gone', (_e, d) => console.log('[lifecycle] child gone:', JSON.stringify(d)))
+process.on('exit', (code) => console.log('[lifecycle] process exit', code))
+process.on('uncaughtException', (err) => console.log('[lifecycle] uncaught:', err && err.stack ? err.stack.split('\n')[0] : err))
 
 app.on('will-quit', () => {
   if (statsTimer) clearInterval(statsTimer)

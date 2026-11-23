@@ -1,6 +1,6 @@
 {
   "startAtLogin": true,
-  "startHidden": true,
+  "startHidden": false,
   "autoHideSeconds": 45,
   "uiScale": 1,
   "briefOnStart": true,
