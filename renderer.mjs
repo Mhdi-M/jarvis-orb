@@ -779,10 +779,10 @@ async function localIntent(text, intent) {
     const body = String(res.text).trim()
     if (intent.summarize) {
       /* read it here, then hand the text to the agent to answer about it */
-      addSys(`\u2192 read ${body.length.toLocaleString()} chars from ${intent.label}`, true)
       runAsk(
-        `Answer from this page only, in 3 short bullets, no preamble.\n` +
-        `Page: ${intent.target}\n\n${body.slice(0, 6000)}`
+        'Answer from this page only, in 3 short bullets, no preamble.\n' +
+        `Page: ${intent.target}\n\n${body.slice(0, 6000)}`,
+        { silent: true }
       )
       return true
     }
