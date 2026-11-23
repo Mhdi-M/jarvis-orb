@@ -20,3 +20,6 @@ notch.v1.bak
 # scratch
 *.tmp
 *.png
+
+# stale UI snapshots
+*.pre-*.html
