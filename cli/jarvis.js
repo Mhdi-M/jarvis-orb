@@ -46,7 +46,24 @@ const C = {
 }
 const paint = (c, s) => c + s + C.reset
 const stripAnsi = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, '')
-const strWidth = (s) => [...stripAnsi(s)].length
+/* display cells, not code points: CJK and emoji take two, combining marks none.
+ * The cursor column, padding and every box edge depend on this being right. */
+const strWidth = (s) => {
+  let w = 0
+  for (const ch of stripAnsi(s)) {
+    const cp = ch.codePointAt(0)
+    if (cp === 0x200d || cp === 0xfe0f || (cp >= 0x0300 && cp <= 0x036f)) continue
+    const wide = (cp >= 0x1100 && cp <= 0x115f) || cp === 0x2329 || cp === 0x232a ||
+      (cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f) ||
+      (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) ||
+      (cp >= 0xfe10 && cp <= 0xfe19) || (cp >= 0xfe30 && cp <= 0xfe6f) ||
+      (cp >= 0xff00 && cp <= 0xff60) || (cp >= 0xffe0 && cp <= 0xffe6) ||
+      (cp >= 0x1f300 && cp <= 0x1f64f) || (cp >= 0x1f900 && cp <= 0x1f9ff) ||
+      (cp >= 0x1f000 && cp <= 0x1f02f) || (cp >= 0x20000 && cp <= 0x3fffd)
+    w += wide ? 2 : 1
+  }
+  return w
+}
 const pad = (s, n) => { const w = strWidth(s); return w >= n ? cut(s, n) : s + ' '.repeat(n - w) }
 const cut = (s, n) => {
   if (strWidth(s) <= n) return s
@@ -85,6 +102,8 @@ const state = {
   dragging: false,
   selAll: false,       // whole input line selected
   lastClick: { at: 0, y: -1 },
+  lastAnswer: null,    // { ms, tokIn, tokOut, modelMs, at } for the bottom box
+  asyncLast: null,
   tokens: { lastIn: 0, lastOut: 0, sessionIn: 0, sessionOut: 0, context: 0 },
   hw: { cpu: 0, ram: 0, gpu: null, diskFree: 0, diskTotal: 0 },
   model: config.model || 'session default',
@@ -243,29 +262,21 @@ let SCR = null          // lib/screen.mjs, loaded in main()
 let KEYS = null         // lib/keys.mjs, loaded in main()
 
 /* ------------------------------------------------------------------- art */
-/* The galaxy is the busy indicator and the empty-state identity: big and blue,
- * no box, nothing at the top of the frame. */
-const GALAXY = [
-  ['      \u00b7    \u2726      ',
-   '   \u2726  \u2584\u2588\u2588\u2588\u2584    ',
-   '  \u00b7  \u2588\u2588\u2588\u2588\u2588\u2588\u2588  \u00b7 ',
-   '   \u2726  \u2580\u2588\u2588\u2588\u2580    ',
-   '      \u00b7    \u2726      '],
-  ['   \u00b7       \u2726     ',
-   '      \u2584\u2588\u2588\u2588\u2584 \u2726  ',
-   '  \u2726 \u2588\u2588\u2588\u2588\u2588\u2588\u2588   \u00b7',
-   '      \u2580\u2588\u2588\u2588\u2580    ',
-   '   \u2726      \u00b7      '],
-  ['      \u2726    \u00b7      ',
-   '   \u00b7  \u2584\u2588\u2588\u2588\u2584    ',
-   '  \u2726  \u2588\u2588\u2588\u2588\u2588\u2588\u2588 \u2726 ',
-   '   \u00b7  \u2580\u2588\u2588\u2588\u2580    ',
-   '      \u2726    \u00b7      '],
-  ['   \u2726       \u00b7     ',
-   '  \u00b7   \u2584\u2588\u2588\u2588\u2584   \u2726 ',
-   '     \u2588\u2588\u2588\u2588\u2588\u2588\u2588 \u00b7  ',
-   '  \u2726   \u2580\u2588\u2588\u2588\u2580    ',
-   '   \u00b7       \u2726     '],
+/* A fixed strip at the top of the frame: the galaxy lives here and never
+ * scrolls with the transcript. */
+const ANIM = [
+  ['   \u00b7   \u2726   \u00b7   ',
+   '  \u2726 \u2584\u2588\u2588\u2588\u2584 \u2726  ',
+   '   \u00b7   \u2726   \u00b7   '],
+  ['  \u00b7    \u2726    \u00b7  ',
+   '   \u2726\u2584\u2588\u2588\u2588\u2584\u2726   ',
+   '  \u00b7    \u2726    \u00b7  '],
+  ['   \u2726   \u00b7   \u2726   ',
+   '  \u00b7 \u2584\u2588\u2588\u2588\u2584 \u00b7  ',
+   '   \u2726   \u00b7   \u2726   '],
+  ['  \u2726    \u00b7    \u2726  ',
+   '   \u00b7\u2584\u2588\u2588\u2588\u2584\u00b7   ',
+   '  \u2726    \u00b7    \u2726  '],
 ]
 
 const BANNER = [
@@ -277,12 +288,15 @@ const BANNER = [
   ' \u255a\u2550\u2550\u2550\u2550\u255d \u255a\u2550\u255d  \u255a\u2550\u255d\u255a\u2550\u255d  \u255a\u2550\u255d  \u255a\u2550\u2550\u2550\u255d  \u255a\u2550\u255d\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d',
 ]
 
-function galaxyRows(width) {
-  const frame = GALAXY[state.spin % GALAXY.length]
-  return frame.map((l) => ({ art: paint(C.accent, cut(l, width)) }))
+/* the input line scrolls sideways so the cursor is always on screen and lands on
+ * the right column even when the text has wide characters */
+function inputView(text, pos, avail) {
+  const width = (v) => strWidth(v)
+  let start = 0
+  while (start < text.length && (width(text.slice(start)) > avail - 1 || width(text.slice(start, pos)) > avail - 2)) start++
+  return { text: text.slice(start), off: Math.max(0, pos - start) }
 }
 
-/* ----------------------------------------------------------------- render */
 function render() {
   if (!INTERACTIVE) return
   lastRender = Date.now()
@@ -290,56 +304,48 @@ function render() {
   const rows = process.stdout.rows || 30
   const sideW = cols >= 92 ? 34 : 0
   const chatW = cols - sideW - 3
-  const bodyRows = rows - 3          // rule + input + one spare, never more
+  const animRows = rows >= 20 ? 3 : 0
+  const bodyRows = rows - animRows - 4       // animation + rule + box + input + spare
   if (bodyRows < 5) return
 
-  // ---- build every transcript row, remembering which line it came from
+  // ---- transcript rows (schema is role-tagged so questions cannot be confused
+  //      with answers: amber gutter for you, blue labelled gutter for Jarvis)
   const all = []
-  const push = (head, text, color, src, plain) => all.push({ head, text, color, src, plain })
+  const push = (head, text, plain, src) => all.push({ head, text, plain, src })
 
   if (!state.lines.length) {
-    for (let b = 0; b < BANNER.length; b++) push('', paint(C.accent, C.bold + cut(BANNER[b], chatW)), null, -1, cut(BANNER[b], chatW))
-    push('', '', null, -1, '')
-    for (const g of galaxyRows(chatW)) push('', g.art, null, -1, '')
-    push('', paint(C.dimmer, '  type a question, or ') + paint(C.accent, '/help') + paint(C.dimmer, '   ·   open notepad · read example.com'), null, -1, '')
+    for (let b = 0; b < BANNER.length; b++) push('', paint(C.accent, C.bold + cut(BANNER[b], chatW)), cut(BANNER[b], chatW), -1)
+    push('', '', '', -1)
+    push('', paint(C.dimmer, '  type a question, or ') + paint(C.accent, '/help') + paint(C.dimmer, '   \u00b7   open notepad \u00b7 read example.com'), '', -1)
   } else {
     for (let li = 0; li < state.lines.length; li++) {
       const l = state.lines[li]
-      if (l.role === 'galaxy') continue
+      if (l.role === 'meta') continue
       let head = '      '
       let color = C.bright
-      if (l.role === 'you') { head = paint(C.dimmer, 'you ') + paint(C.accent, '\u203a '); color = C.steel }
-      else if (l.role === 'sys') { head = '    '; color = C.dimmer }
-      else if (l.role === 'think') { head = paint(C.accent, '  \u2503 '); color = C.steel }
-      else if (l.role === 'meta') { head = '    '; color = C.dimmer }
-      const avail = Math.max(8, chatW - strWidth(head))
+      let wide = '      '
+      if (l.role === 'you') { head = paint(C.amber, '\u258c you '); wide = '       '; color = C.bright }
+      else if (l.role === 'jarvis') { head = paint(C.accent, '\u258c JARVIS '); wide = '          '; color = C.bright }
+      else if (l.role === 'think') { head = paint(C.accent, '   \u2503 '); wide = '     '; color = C.steel }
+      else if (l.role === 'sys') { head = paint(C.dimmer, '    \u00b7 '); wide = '      '; color = C.dimmer }
+      const headPlain = head.replace(/\x1b\[[0-9;]*m/g, '')
+      const avail = Math.max(8, chatW - strWidth(headPlain))
       const wrapped = wrap(l.text, avail)
-      const plainHead = head.replace(/\x1b\[[0-9;]*m/g, '')
       for (let w = 0; w < wrapped.length; w++) {
-        const h = w === 0 ? head : ' '.repeat(strWidth(head))
-        push(w === 0 ? head : ' '.repeat(strWidth(head)), paint(color, wrapped[w]), null, li,
-             (w === 0 ? plainHead : ' '.repeat(strWidth(head))) + wrapped[w])
+        const h = w === 0 ? head : wide
+        const hp = w === 0 ? headPlain : ' '.repeat(strWidth(headPlain))
+        push(h, paint(color, wrapped[w]), hp + wrapped[w], li)
       }
     }
   }
 
-  // ---- the thinking galaxy sits at the end of the transcript, not in a box
-  if (state.busy) {
-    for (const g of galaxyRows(chatW)) {
-      const plainArt = g.art.replace(/\x1b\[[0-9;]*m/g, '')
-      push('', g.art, null, -1, plainArt)
-    }
-  }
-
-  // ---- viewport
+  // ---- viewport (never includes the animation)
   const total = all.length
   const scroll = SCR ? SCR.clampScroll(state.scroll, total, bodyRows) : Math.max(0, Math.min(Math.max(0, total - bodyRows), state.scroll))
   state.scroll = scroll
   const end = total - scroll
   const start = Math.max(0, end - bodyRows)
   const visible = all.slice(start, end)
-  state.rowSrc = visible.map((r) => (r ? r.src : -2))
-  state.chatW = chatW
 
   // ---- sidebar
   const side = []
@@ -378,38 +384,96 @@ function render() {
   kv('memory', memory.list().length + ' facts')
   kv('uptime', Math.round((Date.now() - state.started) / 60000) + ' min')
 
+  // ---- the animation strip: fixed at the top, never part of the transcript
+  const anim = []
+  if (animRows) {
+    const frame = ANIM[state.busy ? state.spin % ANIM.length : 0]
+    for (let a = 0; a < animRows; a++) {
+      const line = cut(frame[a] || '', Math.max(4, chatW))
+      anim.push(paint(C.accent, line))
+    }
+  }
+
+  // ---- bottom box: time, tokens, model, session for the last answer
+  const la = state.lastAnswer
+  const segs = []
+  if (la) {
+    segs.push('\u23f1 ' + (la.ms / 1000).toFixed(1) + 's')
+    if (la.tokIn) segs.push(la.tokIn + ' in / ' + la.tokOut + ' out')
+    if (la.modelMs) segs.push('model ' + (la.modelMs / 1000).toFixed(1) + 's')
+    segs.push(new Date(la.at).toTimeString().slice(0, 8))
+  } else {
+    segs.push('no answer yet')
+  }
+  segs.push('session ' + state.tokens.sessionIn + '/' + state.tokens.sessionOut)
+  segs.push('ctx ' + (state.tokens.context ? (state.tokens.context / 1000).toFixed(1) + 'k' : '\u2014'))
+  let boxText = segs.join('   \u00b7   ')
+  while (strWidth(boxText) > chatW - 6 && segs.length > 2) { segs.pop(); boxText = segs.join('   \u00b7   ') }
+  const fill = Math.max(0, chatW - strWidth(boxText) - 4)
+  const boxLeft = paint(C.dimmer, '\u251c\u2500 ') + paint(C.steel, boxText) + paint(C.dimmer, ' ' + '\u2500'.repeat(fill) + '\u2524')
+
   // ---- input line
   const inputLabel = state.busy ? paint(C.amber, '\u2026 ') : paint(C.accent, '\u203a ')
-  let hint = state.busy ? paint(C.dimmer, 'esc stops \u00b7 enter queues') : paint(C.dimmer, '/help for commands')
-  if (scroll > 0) hint = paint(C.amber, '\u2191 ' + scroll + ' lines \u00b7 End jumps to the bottom')
+  let hint = state.busy ? paint(C.dimmer, 'esc stops') : paint(C.dimmer, '/help')
+  if (scroll > 0) hint = paint(C.amber, '\u2191 ' + scroll + ' lines \u00b7 End for bottom')
   if (state.selAll) hint = paint(C.amber, 'all selected \u00b7 type to replace')
 
   // ---- compose
   const out = []
   const screen = []
+  const rowSrc = []
   out.push('\x1b[?25l')
   out.push('\x1b[H')
+
+  const put = (left, right) => {
+    out.push(left + (sideW ? paint(C.dimmer, '\u2502') + pad(right || '', sideW) : '') + '\r\n')
+    screen.push(left.replace(/\x1b\[[0-9;]*m/g, '') + (sideW ? '\u2502' : ''))
+    return left.replace(/\x1b\[[0-9;]*m/g, '')
+  }
+
+  for (let a = 0; a < animRows; a++) {
+    put(pad(anim[a] || '', chatW), side[a] || '')
+    rowSrc.push(-2)
+  }
   for (let r = 0; r < bodyRows; r++) {
     const row = visible[r]
     const left = row ? pad(cut(row.head + row.text, chatW), chatW) : ' '.repeat(chatW)
-    const right = side[r] || ''
-    out.push(left + (sideW ? paint(C.dimmer, '\u2502') + pad(right, sideW) : '') + '\r\n')
-    const plainLeft = row ? cut(row.plain, chatW) : ''
-    const plainRight = right ? right.replace(/\x1b\[[0-9;]*m/g, '') : ''
-    screen.push(pad(plainLeft, chatW) + (sideW ? '\u2502' + pad(plainRight, sideW) : ''))
+    const plain = row ? row.plain : ''
+    out.push(left + (sideW ? paint(C.dimmer, '\u2502') + pad(side[animRows + r] || '', sideW) : '') + '\r\n')
+    screen.push(pad(cut(plain, chatW), chatW) + (sideW ? '\u2502' : ''))
+    rowSrc.push(row ? row.src : -2)
   }
   out.push(paint(C.dimmer, '\u2500'.repeat(cols)) + '\r\n')
-  const inputStart = 1 + strWidth(inputLabel)
-  const inputText = state.input
-  if (state.selAll && inputText) {
-    out.push(pad(' ' + inputLabel + '\x1b[7m' + inputText + '\x1b[0m', cols - 1))
-  } else {
-    out.push(pad(' ' + inputLabel + inputText, cols - 1))
-  }
-  screen.push((' ' + inputLabel + inputText).replace(/\x1b\[[0-9;]*m/g, ''))
-  state.screen = screen
+  screen.push('\u2500'.repeat(cols))
+  rowSrc.push(-2)
 
-  // ---- paint the selection on top of the frame
+  // the box row shares the strip with the sidebar
+  out.push(pad(boxLeft, chatW) + (sideW ? paint(C.dimmer, '\u2502') + pad(side[animRows + bodyRows + 1] || '', sideW) : '') + '\r\n')
+  screen.push(pad(boxLeft.replace(/\x1b\[[0-9;]*m/g, ''), chatW) + (sideW ? '\u2502' : ''))
+  rowSrc.push(-2)
+
+  const inputStart = 1 + strWidth(inputLabel)
+  const availInput = Math.max(8, cols - 1 - inputStart - 1)
+  const view = inputView(state.input, state.pos, availInput)
+  if (state.selAll && view.text) {
+    out.push(pad(' ' + inputLabel + '\x1b[7m' + view.text + '\x1b[0m', cols - 1))
+  } else {
+    out.push(pad(' ' + inputLabel + view.text, cols - 1))
+  }
+  screen.push((' ' + inputLabel + view.text).replace(/\x1b\[[0-9;]*m/g, ''))
+  rowSrc.push(-2)
+  state.screen = screen
+  state.rowSrc = rowSrc
+  state.chatW = chatW
+
+  const inputRow = animRows + bodyRows + 3
+  const hintPlain = hint.replace(/\x1b\[[0-9;]*m/g, '')
+  const hintCol = cols - strWidth(hintPlain) - 1
+  if (hintCol > inputStart + strWidth(view.text) + 2) {
+    out.push('\x1b[' + inputRow + ';' + hintCol + 'H' + hint)
+  }
+
+  // ---- selection painted on top of the frame
   const sel = state.sel
   if (sel && sel.r1 != null) {
     const a = Math.min(sel.r1, sel.r2)
@@ -417,22 +481,16 @@ function render() {
     for (let r = a; r <= b; r++) {
       const line = screen[r - 1]
       if (!line) continue
-      const from = (r === sel.r1 && a === sel.r1) ? Math.max(0, sel.c1 - 1) : 0
-      const to = (r === sel.r2) ? Math.max(0, sel.c2) : line.length
+      const from = (r === a) ? Math.max(0, sel.c1 - 1) : 0
+      const to = (r === b) ? Math.max(0, sel.c2) : line.length
       const piece = line.slice(from, Math.max(from, to))
       if (!piece.trim()) continue
       out.push('\x1b[' + r + ';' + (from + 1) + 'H' + '\x1b[7m' + piece + '\x1b[0m')
     }
   }
 
-  const inputRow = bodyRows + 2
-  // right-aligned hint: scroll position, selection state, or /help
-  const hintPlain = hint.replace(/\x1b\[[0-9;]*m/g, '')
-  const hintCol = cols - strWidth(hintPlain) - 1
-  if (hintCol > inputStart + strWidth(inputText) + 2) {
-    out.push('\x1b[' + inputRow + ';' + hintCol + 'H' + hint)
-  }
-  const cursorCol = inputStart + state.pos
+  // cursor lands after the visible prefix, so wide characters do not shift it
+  const cursorCol = inputStart + strWidth(view.text.slice(0, view.off))
   out.push('\x1b[' + inputRow + ';' + Math.max(1, Math.min(cols - 1, cursorCol)) + 'H')
   out.push('\x1b[?25h')
   process.stdout.write(out.join(''))
@@ -568,11 +626,13 @@ async function askAgent(text) {
     const total = Date.now() - t0
     const modelMs = state.lastMs && state.lastMs !== total ? state.lastMs : 0
     state.lastMs = total
-    const bits = ['\u23f1 ' + (total / 1000).toFixed(1) + 's']
-    if (state.tokens.lastIn) bits.push(state.tokens.lastIn + ' in / ' + state.tokens.lastOut + ' out')
-    if (modelMs) bits.push('model ' + (modelMs / 1000).toFixed(1) + 's')
-    bits.push(new Date().toTimeString().slice(0, 8))
-    addLine('meta', bits.join('   \u00b7   '))
+    state.lastAnswer = {
+      ms: total,
+      tokIn: state.tokens.lastIn,
+      tokOut: state.tokens.lastOut,
+      modelMs,
+      at: Date.now(),
+    }
     state.busy = false
     state.busySince = 0
     state.status = 'ready'
@@ -1339,6 +1399,9 @@ async function main() {
     if (process.argv.includes('--sel')) state.sel = { r1: 2, c1: 1, r2: 3, c2: 24 }
     if (process.argv.includes('--selall')) state.selAll = true
     if (process.argv.includes('--busy')) { state.busy = true; state.busySince = Date.now() - 4200 }
+    if (!process.argv.includes('--empty')) {
+      state.lastAnswer = { ms: 10100, tokIn: 28127, tokOut: 82, modelMs: 7400, at: Date.now() }
+    }
     if (process.argv.includes('--think')) {
       state.trace = true
       state.thinking = [
@@ -1402,13 +1465,41 @@ async function main() {
     out.scrollAfterPgUp = state.scroll
     onMouse({ button: 'wheelup', x: 5, y: 5 })
     out.scrollAfterWheel = state.scroll
-    onMouse({ button: 'left', x: 3, y: 1 })
-    onMouse({ button: 'left', x: 3, y: 1 })
+    onMouse({ button: 'left', x: 3, y: 5 })
+    onMouse({ button: 'left', x: 3, y: 5 })
     out.blockSel = state.sel
     out.blockText = SCR ? SCR.selectionText(state.screen, state.sel) : null
     onEvent({ type: 'esc' })
     out.escClearedSelection = state.sel === null
     out.screenRows = state.screen.length
+    // cursor placement: width-aware, and scrolled when the line is too long
+    const cursorOf = () => {
+      const chunks = []
+      const orig2 = process.stdout.write
+      process.stdout.write = (c) => { chunks.push(String(c)); return true }
+      INTERACTIVE = true
+      render()
+      process.stdout.write = orig2
+      const m = String(chunks.join("")).match(/\x1b\[(\d+);(\d+)H\x1b\[\?25h$/)
+      return m ? Number(m[2]) : -1
+    }
+    const cols = process.stdout.columns || 120
+    state.input = 'hello'
+    state.pos = 5
+    out.cursorShort = cursorOf()
+    state.input = '\u65e5\u672c\u8a9e\u30c6\u30ad\u30b9\u30c8'
+    state.pos = 3
+    out.cursorWide = cursorOf()
+    state.input = 'x'.repeat(300)
+    state.pos = 300
+    const c2 = cursorOf()
+    out.cursorLong = c2
+    out.cursorLongVisible = c2 > 0 && c2 <= cols - 1
+    state.input = 'middle'
+    state.pos = 2
+    out.cursorMid = cursorOf()
+    state.input = ''
+    state.pos = 0
     process.stdout.write = orig
     INTERACTIVE = false
     orig(JSON.stringify(out) + '\n')
