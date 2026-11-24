@@ -223,7 +223,9 @@ function startTempPolling() {
   if (tempPollTimer) return
   pollGpu(); pollCpuTemp(); pollDiskTemp()
   tempPollTimer = setInterval(() => { pollGpu(); pollCpuTemp(); pollDiskTemp() }, 10000)
-  setTimeout(() => { startTempPolling() }, 30000)
+  if (tempPollTimer.unref) tempPollTimer.unref()
+  const retry = setTimeout(() => { startTempPolling() }, 30000)
+  if (retry.unref) retry.unref()
 }
 
 /* ---------------------------------------------------------------- rendering */
@@ -666,8 +668,8 @@ function fetchPage(url) {
 /* ---------------------------------------------------------------- commands */
 const HELP = [
   ['/help', 'this list'],
-  ['/think [on|off]', 'show or hide the thinking block above the sidebar'],
-  ['/timing [on|off]', 'show or hide per-step timings inside the thinking block'],
+  ['/think [on|off]', 'show or hide the procedure under each question'],
+  ['/timing [on|off]', 'show or hide the +0.0s timings on those lines'],
   ['/model [name]', 'show or set the model (used for the next new session)'],
   ['/agent [cloud|local]', 'where answers come from'],
   ['/new', 'start a fresh conversation'],
@@ -763,8 +765,16 @@ async function command(raw) {
       break
 
     case 'hw': {
+      // sensors answer asynchronously: give the first poll a moment on a cold start
+      if (state.hw.gpuTemp == null && state.hw.cpuTemp == null) {
+        pollGpu(); pollCpuTemp(); pollDiskTemp()
+        await new Promise((r) => setTimeout(r, 900))
+      }
       refreshHw()
-      sys(`CPU  ${Math.round(state.hw.cpu)}%   RAM ${Math.round(state.hw.ram)}%   GPU ${state.hw.gpu == null ? 'n/a' : Math.round(state.hw.gpu) + '°C'}`)
+      const t = (c) => (c == null ? 'n/a' : Math.round(c) + '°C')
+      sys(`CPU  ${Math.round(state.hw.cpu)}%  ${t(state.hw.cpuTemp)}   RAM ${Math.round(state.hw.ram)}%`)
+      sys(`GPU  ${state.hw.gpuName || 'n/a'}  ${t(state.hw.gpuTemp)}${state.hw.gpuUtil != null ? '  ' + state.hw.gpuUtil + '%' : ''}`)
+      if (state.hw.diskTemp != null) sys(`SSD  ${t(state.hw.diskTemp)}`)
       const used = state.hw.diskTotal ? 100 * (1 - state.hw.diskFree / state.hw.diskTotal) : 0
       sys(`disk ${used ? Math.round(used) + '% used · ' + (state.hw.diskFree / 1e9).toFixed(0) + ' GB free' : 'n/a'}`)
       break
@@ -1425,7 +1435,7 @@ async function main() {
       else if (l.role === 'sys') process.stdout.write(paint(C.dimmer, t) + '\n')
       else process.stdout.write(t + '\n')
     }
-    return
+    process.exit(0)
   }
 
   if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== 'function') {
@@ -1452,13 +1462,13 @@ function pathToFileUrl(p) {
 }
 
 process.on('uncaughtException', (e) => {
-  try { process.stdout.write('\x1b[?25h\x1b[?1049l') } catch {}
+  try { process.stdout.write((KEYS ? KEYS.MOUSE_OFF + KEYS.PASTE_OFF : '') + '\x1b[?25h\x1b[?1049l') } catch {}
   console.error('jarvis crashed:', e && e.stack ? e.stack : e)
   process.exit(1)
 })
 
 main().catch((e) => {
-  try { process.stdout.write('\x1b[?25h\x1b[?1049l') } catch {}
+  try { process.stdout.write((KEYS ? KEYS.MOUSE_OFF + KEYS.PASTE_OFF : '') + '\x1b[?25h\x1b[?1049l') } catch {}
   console.error('jarvis failed to start:', e && e.message ? e.message : e)
   process.exit(1)
 })
