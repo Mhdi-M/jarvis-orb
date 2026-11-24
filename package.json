@@ -1,21 +1,18 @@
 {
-  "name": "jarvis-orb",
-  "version": "1.0.0",
-  "description": "Floating Jarvis orb that talks to Hermes Agent",
-  "main": "main.js",
+  "name": "jarvis-cli",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Jarvis — a terminal assistant backed by your local Hermes Agent",
+  "main": "cli/jarvis.js",
+  "bin": {
+    "jarvis": "cli/jarvis.js"
+  },
   "scripts": {
-    "start": "electron .",
+    "start": "node cli/jarvis.js",
     "test": "node --test tests/",
     "stress": "node tests/stress.mjs"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": ["assistant", "terminal", "cli", "hermes"],
   "license": "ISC",
-  "type": "commonjs",
-  "devDependencies": {
-    "electron": "^45.4.1"
-  },
-  "dependencies": {
-    "three": "^0.187.0"
-  }
+  "type": "commonjs"
 }

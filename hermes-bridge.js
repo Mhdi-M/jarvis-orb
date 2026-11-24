@@ -20,7 +20,7 @@ const netmode = require('./lib/netmode')
 const profile = require('./lib/profile')
 const monitor = require('./lib/monitor')
 
-const settings = { netMode: 'direct', preferLocal: false }
+const settings = { netMode: 'direct', preferLocal: false, model: '', provider: '' }
 
 const HERMES_EXE =
   process.env.JARVIS_HERMES_EXE ||
@@ -121,7 +121,25 @@ function parseJsonLine(line) {
   } catch { return null }
 }
 
-function spawnHermes(text, onDelta) {
+/**
+ * A session whose last turn was cut off is "paused" and refuses new turns.
+ * Discard that turn and start clean, rather than leaving the user stuck.
+ */
+function discardPausedSession(id) {
+  return new Promise((resolve) => {
+    if (!id) return resolve(false)
+    const { execFile } = require('child_process')
+    execFile(HERMES_EXE, ['sessions', 'discard', id, '--yes'],
+      { cwd: os.homedir(), windowsHide: true, timeout: 30000, env: { ...process.env } },
+      (err) => {
+        if (err) console.log('[bridge] discard failed:', err.message)
+        resetSession()
+        resolve(!err)
+      })
+  })
+}
+
+function spawnHermes(text, onDelta, onMeta) {
   return new Promise((resolve) => {
     const fast = isFastQuery(text)
     /* Resume pins the session's launch policy: --max-turns/--reasoning are
@@ -130,7 +148,9 @@ function spawnHermes(text, onDelta) {
       ? ['--resume', sessionId, 'chat', '-q', text, '--format', 'stream-json']
       : ['chat', '-q', text, '--format', 'stream-json',
          '--max-turns', fast ? '4' : '12',
-         ...(fast ? ['--reasoning', 'minimal'] : [])]
+         ...(fast ? ['--reasoning', 'minimal'] : []),
+         ...(settings.model ? ['-m', settings.model] : []),
+         ...(settings.provider ? ['--provider', settings.provider] : [])]
 
     let child
     try {
@@ -183,6 +203,16 @@ function spawnHermes(text, onDelta) {
           resultEvent = evt
           if (evt.session_id && evt.session_id !== sessionId) saveSession(evt.session_id)
           if (evt.tokens && Number.isFinite(evt.tokens.input)) lastInputTokens = evt.tokens.input
+          if (onMeta) {
+            try {
+              onMeta({
+                tokens: evt.tokens || null,
+                sessionId: evt.session_id || sessionId,
+                durationMs: evt.duration_ms || null,
+                contextTokens: lastInputTokens,
+              })
+            } catch {}
+          }
         }
       }
     })
@@ -257,7 +287,12 @@ function ask(text, opts = {}) {
     if (settings.preferLocal) return Object.assign(await offlineAnswer(text), learned.length ? { learned } : {})
     const ctx = [memory.context(text), memory.isEnabled() ? profile.styleHint() : '', memory.isEnabled() ? profile.recentContext() : '', pressureNote()].filter(Boolean).join('\n')
     const prompt = ctx ? `[Context from Jarvis, do not mention unless relevant]\n${ctx}\n\n${text}` : text
-    let res = await spawnHermes(prompt, opts.onDelta)
+    let res = await spawnHermes(prompt, opts.onDelta, opts.onMeta)
+    if (!res.ok && /chat is paused|was not sent|paused turn/i.test(res.text || '')) {
+      console.log('[bridge] session was paused — discarding the stuck turn and retrying')
+      await discardPausedSession(sessionId)
+      res = await spawnHermes(prompt, opts.onDelta, opts.onMeta)
+    }
     if (!res.ok && NET_ERR.test(res.text || '')) {
       const local = await offlineAnswer(text)
       res = local.ok ? local : { ...res, text: res.text + '\n(Local fallback also unavailable.)' }
