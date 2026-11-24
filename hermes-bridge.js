@@ -40,19 +40,27 @@ const STATE_FILE = path.join(__dirname, 'session.json')
 const TIMEOUT_MS = 5 * 60 * 1000
 
 let sessionId = null
-/* A resumed session replays its whole transcript, so latency grows with it.
-   Measured here: a fresh session answered in ~5 s, the same question in a
-   41k-token session took ~13 s. Recycle well before that. */
+/* A resumed session replays its whole transcript, so latency grows with it: the
+   same question took 4.5 s in a fresh session and 11-13 s in a 75k-token one.
+   The size is persisted with the id so a new process recycles *before* paying
+   for one slow turn. */
 let lastInputTokens = 0
-const CTX_RECYCLE_AT = 25000
+const CTX_RECYCLE_AT = Number(process.env.JARVIS_CTX_LIMIT || 20000)
 try {
   const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
   if (raw && typeof raw.sessionId === 'string') sessionId = raw.sessionId
+  if (raw && Number.isFinite(raw.tokens)) lastInputTokens = raw.tokens
 } catch { /* first run */ }
 
 function saveSession(id) {
   sessionId = id
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify({ sessionId: id }, null, 2)) } catch {}
+  try { fs.writeFileSync(STATE_FILE, JSON.stringify({ sessionId: id, tokens: lastInputTokens }, null, 2)) } catch {}
+}
+
+function saveTokens(n) {
+  if (!Number.isFinite(n)) return
+  lastInputTokens = n
+  try { fs.writeFileSync(STATE_FILE, JSON.stringify({ sessionId, tokens: n }, null, 2)) } catch {}
 }
 
 function resetSession() {
@@ -212,7 +220,7 @@ function spawnHermes(text, onDelta, onMeta) {
         } else if (evt.type === 'result') {
           resultEvent = evt
           if (evt.session_id && evt.session_id !== sessionId) saveSession(evt.session_id)
-          if (evt.tokens && Number.isFinite(evt.tokens.input)) lastInputTokens = evt.tokens.input
+          if (evt.tokens && Number.isFinite(evt.tokens.input)) saveTokens(evt.tokens.input)
           if (onMeta) {
             try {
               onMeta({
