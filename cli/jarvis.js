@@ -35,15 +35,21 @@ const NOTE_FILE = path.join(ROOT, 'data', 'notes.json')
 /* ------------------------------------------------------------------ style */
 const C = {
   reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m',
-  accent: '\x1b[38;2;127;180;216m',
-  bright: '\x1b[38;2;236;246;255m',
-  steel: '\x1b[38;2;150;176;198m',
-  dimmer: '\x1b[38;2;96;120;140m',
-  green: '\x1b[38;2;126;214;168m',
-  amber: '\x1b[38;2;240;198;116m',
-  red: '\x1b[38;2;224;120;130m',
-  violet: '\x1b[38;2;168;156;240m',
+  accent: '\x1b[38;2;86;138;214m',
+  bright: '\x1b[38;2;236;241;247m',
+  // silver on black with deep blue structure: three tones + one hue, no more
+  steel: '\x1b[38;2;168;180;196m',      // secondary text
+  dimmer: '\x1b[38;2;104;118;138m',     // meta, labels, procedure
+  green: '\x1b[38;2;140;200;170m',
+  amber: '\x1b[38;2;214;196;140m',
+  red: '\x1b[38;2;216;132;140m',
+  violet: '\x1b[38;2;150;160;210m',
+  edge: '\x1b[38;2;42;74;124m',         // deep blue borders
+  blue: '\x1b[38;2;86;138;214m',        // deep blue accents
+  panel: '\x1b[48;2;14;18;25m',         // near-black panel
+  panelAlt: '\x1b[48;2;21;27;37m',      // slightly lifted panel
 }
+const bar1 = (s2) => C.panel + s2 + C.reset
 const paint = (c, s) => c + s + C.reset
 const stripAnsi = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, '')
 /* display cells, not code points: CJK and emoji take two, combining marks none.
@@ -318,16 +324,28 @@ function render() {
     push('', '', '', -1)
     push('', paint(C.dimmer, '  type a question, or ') + paint(C.accent, '/help') + paint(C.dimmer, '   \u00b7   open notepad \u00b7 read example.com'), '', -1)
   } else {
+    let prevRole = null
     for (let li = 0; li < state.lines.length; li++) {
       const l = state.lines[li]
       if (l.role === 'meta') continue
       let head = '      '
       let color = C.bright
       let wide = '      '
-      if (l.role === 'you') { head = paint(C.amber, '\u258c you '); wide = '       '; color = C.bright }
-      else if (l.role === 'jarvis') { head = paint(C.accent, '\u258c JARVIS '); wide = '          '; color = C.bright }
-      else if (l.role === 'think') { head = paint(C.accent, '   \u2503 '); wide = '     '; color = C.steel }
-      else if (l.role === 'sys') { head = paint(C.dimmer, '    \u00b7 '); wide = '      '; color = C.dimmer }
+      if (l.role === 'you') {
+        head = paint(C.blue, '\u258c ') + paint(C.steel, C.bold + pad('you', 7))
+        wide = ' '.repeat(9); color = C.steel
+      } else if (l.role === 'jarvis') {
+        head = paint(C.blue, '\u258c ') + paint(C.dimmer, C.bold + pad('JARVIS', 7))
+        wide = ' '.repeat(9); color = C.bright
+      } else if (l.role === 'think') {
+        head = ' '.repeat(7) + paint(C.edge, '\u2503 '); wide = ' '.repeat(9); color = C.dimmer
+      } else if (l.role === 'sys') {
+        head = ' '.repeat(7) + paint(C.edge, '\u00b7 '); wide = ' '.repeat(9); color = C.dimmer
+      }
+      if (l.role === 'you' && prevRole === 'jarvis') {
+        push('', '', '', -3)          // one blank row between an answer and the next question
+      }
+      prevRole = l.role
       const headPlain = head.replace(/\x1b\[[0-9;]*m/g, '')
       const avail = Math.max(8, chatW - strWidth(headPlain))
       const wrapped = wrap(l.text, avail)
@@ -349,8 +367,8 @@ function render() {
 
   // ---- sidebar
   const side = []
-  const rule = paint(C.dimmer, '\u2500'.repeat(Math.max(0, sideW - 2)))
-  const kv = (k, v) => side.push(' ' + paint(C.dimmer, pad(k, 10)) + pad(v, sideW - 13))
+  const rule = paint(C.edge, '\u2500'.repeat(Math.max(0, sideW - 2)))
+  const kv = (k, v) => side.push(' ' + paint(C.dimmer, pad(k, 10)) + pad(paint(C.steel, v), sideW - 13))
   side.push(paint(C.accent, C.bold + ' JARVIS') + paint(C.dimmer, '  ' + new Date().toTimeString().slice(0, 5)))
   side.push(rule)
   side.push(' ' + paint(C.dimmer, 'MODEL'))
@@ -410,7 +428,8 @@ function render() {
   let boxText = segs.join('   \u00b7   ')
   while (strWidth(boxText) > chatW - 6 && segs.length > 2) { segs.pop(); boxText = segs.join('   \u00b7   ') }
   const fill = Math.max(0, chatW - strWidth(boxText) - 4)
-  const boxLeft = paint(C.dimmer, '\u251c\u2500 ') + paint(C.steel, boxText) + paint(C.dimmer, ' ' + '\u2500'.repeat(fill) + '\u2524')
+  const boxLeft = C.panel + paint(C.edge, '\u251c\u2500 ') + paint(C.steel, boxText) +
+    paint(C.edge, ' ' + '\u2500'.repeat(fill) + '\u2524') + C.reset
 
   // ---- input line
   const inputLabel = state.busy ? paint(C.amber, '\u2026 ') : paint(C.accent, '\u203a ')
@@ -426,7 +445,7 @@ function render() {
   out.push('\x1b[H')
 
   const put = (left, right) => {
-    out.push(left + (sideW ? paint(C.dimmer, '\u2502') + pad(right || '', sideW) : '') + '\r\n')
+    out.push(left + (sideW ? paint(C.edge, '\u2502') + pad(right || '', sideW) : '') + '\r\n')
     screen.push(left.replace(/\x1b\[[0-9;]*m/g, '') + (sideW ? '\u2502' : ''))
     return left.replace(/\x1b\[[0-9;]*m/g, '')
   }
@@ -439,27 +458,26 @@ function render() {
     const row = visible[r]
     const left = row ? pad(cut(row.head + row.text, chatW), chatW) : ' '.repeat(chatW)
     const plain = row ? row.plain : ''
-    out.push(left + (sideW ? paint(C.dimmer, '\u2502') + pad(side[animRows + r] || '', sideW) : '') + '\r\n')
+    out.push(left + (sideW ? paint(C.edge, '\u2502') + pad(side[animRows + r] || '', sideW) : '') + '\r\n')
     screen.push(pad(cut(plain, chatW), chatW) + (sideW ? '\u2502' : ''))
     rowSrc.push(row ? row.src : -2)
   }
-  out.push(paint(C.dimmer, '\u2500'.repeat(cols)) + '\r\n')
+  out.push(paint(C.edge, '\u2500'.repeat(cols)) + '\r\n')
   screen.push('\u2500'.repeat(cols))
   rowSrc.push(-2)
 
   // the box row shares the strip with the sidebar
-  out.push(pad(boxLeft, chatW) + (sideW ? paint(C.dimmer, '\u2502') + pad(side[animRows + bodyRows + 1] || '', sideW) : '') + '\r\n')
+  out.push(pad(boxLeft, chatW) + (sideW ? paint(C.edge, '\u2502') + pad(side[animRows + bodyRows + 1] || '', sideW) : '') + '\r\n')
   screen.push(pad(boxLeft.replace(/\x1b\[[0-9;]*m/g, ''), chatW) + (sideW ? '\u2502' : ''))
   rowSrc.push(-2)
 
-  const inputStart = 1 + strWidth(inputLabel)
+  const inputStart = 2 + strWidth(inputLabel)   // ' ' + label, 1-based
   const availInput = Math.max(8, cols - 1 - inputStart - 1)
   const view = inputView(state.input, state.pos, availInput)
-  if (state.selAll && view.text) {
-    out.push(pad(' ' + inputLabel + '\x1b[7m' + view.text + '\x1b[0m', cols - 1))
-  } else {
-    out.push(pad(' ' + inputLabel + view.text, cols - 1))
-  }
+  const inputLine = state.selAll && view.text
+    ? pad(' ' + inputLabel + '\x1b[7m' + view.text + '\x1b[0m', cols - 1)
+    : pad(' ' + inputLabel + paint(C.bright, view.text), cols - 1)
+  out.push(C.panelAlt + inputLine + ' '.repeat(Math.max(0, cols - 1 - strWidth(inputLine))) + C.reset)
   screen.push((' ' + inputLabel + view.text).replace(/\x1b\[[0-9;]*m/g, ''))
   rowSrc.push(-2)
   state.screen = screen
@@ -1379,18 +1397,18 @@ async function main() {
     state.session = 'local-e323ac'
     state.tokens = { lastIn: 13328, lastOut: 162, sessionIn: 41825, sessionOut: 640, context: 27724 }
     const demo = [
-      { role: 'sys', text: 'Jarvis \u00b7 terminal \u00b7 /help for commands' },
+      { role: 'sys', text: 'Jarvis · terminal · /help for commands' },
       { role: 'you', text: 'how much disk is free on C:?' },
       { role: 'think', text: 'asking deepseek-v4-flash  +0.0s' },
-      { role: 'think', text: '\u2192 terminal df -h /c  +6.5s' },
-      { role: 'think', text: '\u2713 terminal done  +7.5s' },
-      { role: 'think', text: 'first token  +9.7s' },
+      { role: 'think', text: '→ terminal df -h /c  +6.5s' },
+      { role: 'think', text: '✓ terminal done  +7.5s' },
       { role: 'jarvis', text: '794G free on C: (208G used of 1002G, 21%).' },
-      { role: 'meta', text: '\u23f1 10.1s   \u00b7   28127 in / 82 out   \u00b7   model 7.4s   \u00b7   15:26:14' },
       { role: 'you', text: 'open notepad' },
-      { role: 'sys', text: '\u2192 launched notepad' },
+      { role: 'sys', text: '→ launched notepad' },
+      { role: 'you', text: 'summarise what you can see in this session' },
+      { role: 'think', text: '→ terminal df -h /c  +2.1s' },
+      { role: 'jarvis', text: 'Two things so far: the C: drive has 794G free, and notepad is running. Nothing else has been asked yet, so there is no session summary to give beyond those two actions.' },
     ]
-    for (let k = 0; k < 40; k++) demo.push({ role: k % 2 ? 'jarvis' : 'you', text: 'filler line ' + k + ' to make the transcript scrollable' })
     state.lines = process.argv.includes('--empty') ? [] : demo
     state.input = 'remind me in 10 min to stretch'
     state.pos = state.input.length
