@@ -78,6 +78,7 @@ const state = {
   history: [],
   busy: false,
   started: Date.now(),
+  spin: 0,
   tokens: { lastIn: 0, lastOut: 0, sessionIn: 0, sessionOut: 0, context: 0 },
   hw: { cpu: 0, ram: 0, gpu: null, diskFree: 0, diskTotal: 0 },
   model: config.model || 'session default',
@@ -222,8 +223,38 @@ function startTempPolling() {
 /* ---------------------------------------------------------------- rendering */
 let lastRender = 0
 let renderTimer = null
+const SPINNER = ['◐','◓','◑','◒']
+let spinTimer = null
+function startSpinner() {
+  if (spinTimer) return
+  state.spin = 0
+  spinTimer = setInterval(() => {
+    if (!state.busy) { clearInterval(spinTimer); spinTimer = null; return }
+    state.spin = (state.spin + 1) % 4
+    // AGENT is the 6th sidebar row (0-based index 5). In the terminal it's at
+    // thinkLines + 5 (header rows) + 1 (1-based escape code) = thinkLines + 6
+    // But we don't have thinkLines here, so use the known constant offset
+    // when sidebar is at top: row 6. The full render handles alignment.
+    const esc = ''
+    const row = 6
+    const col = 12 // after 'AGENT    ' (10 chars padded)
+    process.stdout.write(esc + '[' + row + ';' + col + 'H' + SPINNER[state.spin])
+  }, 120)
+}
+function stopSpinner() {
+  if (spinTimer) { clearInterval(spinTimer); spinTimer = null }
+  // restore the two spaces after AGENT
+  if (!state.busy) {
+    const esc = ''
+    const row = 6
+    const col = 12
+    process.stdout.write(esc + '[' + row + ';' + col + 'H' + '  ')
+  }
+}
 function scheduleRender() {
   if (renderTimer) return
+  if (state.busy && !spinTimer) startSpinner()
+  if (!state.busy && spinTimer) stopSpinner()
   const wait = Math.max(0, 80 - (Date.now() - lastRender))
   renderTimer = setTimeout(() => { renderTimer = null; render() }, wait)
 }
@@ -280,7 +311,8 @@ function render() {
   side.push(' ' + paint(C.dimmer, 'MODEL'))
   side.push(' ' + paint(C.bright, cut(state.model, sideW - 3)))
   side.push(' ' + paint(C.dimmer, 'PROVIDER ') + paint(C.steel, cut(state.provider, sideW - 13)))
-  side.push(' ' + paint(C.dimmer, 'AGENT    ') + paint(state.busy ? C.amber : C.green, state.busy ? 'working' : 'idle'))
+  const spinChar = state.busy ? paint(C.amber, SPINNER[state.spin]) + ' ' : '  '
+  side.push(' ' + paint(C.dimmer, 'AGENT    ') + spinChar + paint(state.busy ? C.amber : C.green, state.busy ? 'working' : 'idle'))
   side.push(' ' + paint(C.dimmer, 'SESSION  ') + paint(C.steel, cut(state.session, sideW - 13)))
   side.push(rule)
   side.push(' ' + paint(C.dimmer, 'TOKENS'))
