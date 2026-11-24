@@ -157,7 +157,7 @@ function discardPausedSession(id) {
   })
 }
 
-function spawnHermes(text, onDelta, onMeta) {
+function spawnHermes(text, onDelta, onMeta, onTrace) {
   return new Promise((resolve) => {
     const fast = isFastQuery(text)
     /* Resume pins the session's launch policy: --max-turns/--reasoning are
@@ -217,6 +217,10 @@ function spawnHermes(text, onDelta, onMeta) {
         if (evt.type === 'text' && typeof evt.text === 'string' && evt.text) {
           streamed += evt.text
           if (onDelta) { try { onDelta(evt.text) } catch {} }
+        } else if (evt.type === 'tool_use' || evt.type === 'tool_result' ||
+                   evt.type === 'thinking' || evt.type === 'reasoning' || evt.type === 'status') {
+          /* the procedure: what it is doing before the answer arrives */
+          if (onTrace) { try { onTrace(evt) } catch {} }
         } else if (evt.type === 'result') {
           resultEvent = evt
           if (evt.session_id && evt.session_id !== sessionId) saveSession(evt.session_id)
@@ -308,7 +312,7 @@ function ask(text, opts = {}) {
     const sessionCtx = session.context('default')
     const ctx = [memory.context(text), memory.isEnabled() ? profile.styleHint() : '', memory.isEnabled() ? profile.recentContext() : '', sessionCtx, skillCtx, pressureNote()].filter(Boolean).join('\n')
     const prompt = ctx ? `[Context from Jarvis, do not mention unless relevant]\n${ctx}\n\n${text}` : text
-    let res = await spawnHermes(prompt, opts.onDelta, opts.onMeta)
+    let res = await spawnHermes(prompt, opts.onDelta, opts.onMeta, opts.onTrace)
     if (!res.ok && /chat is paused|was not sent|paused turn/i.test(res.text || '')) {
       console.log('[bridge] session was paused — discarding the stuck turn and retrying')
       await discardPausedSession(sessionId)

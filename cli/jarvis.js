@@ -88,6 +88,9 @@ const state = {
   lastMs: 0,
   lastSearch: [],     // last /find or /messages result, for /summarize
   lastSource: '',
+  trace: true,        // show the thinking block
+  showTiming: true,   // show per-step timings inside it
+  thinking: null,     // lines of the current thinking block
 }
 
 /* --------------------------------------------------------------- messages */
@@ -152,7 +155,7 @@ let lastRender = 0
 let renderTimer = null
 function scheduleRender() {
   if (renderTimer) return
-  const wait = Math.max(0, 33 - (Date.now() - lastRender))
+  const wait = Math.max(0, 80 - (Date.now() - lastRender))
   renderTimer = setTimeout(() => { renderTimer = null; render() }, wait)
 }
 
@@ -165,8 +168,13 @@ function render() {
   const rows = process.stdout.rows || 30
   const sideW = cols >= 92 ? 34 : 0
   const chatW = cols - sideW - 3
-  const bodyRows = rows - 4
-  if (bodyRows < 6) return
+  // reserve rows for the thinking block: if the frame is taller than the window the
+  // terminal scrolls on every repaint, which is the fast black-screen flicker
+  const thinkLines = (state.trace && state.thinking && state.thinking.length)
+    ? Math.min(state.thinking.length, Math.max(0, Math.min(6, Math.floor((rows - 9) / 3))))
+    : 0
+  const bodyRows = rows - 3 - thinkLines
+  if (bodyRows < 5) return
 
   // ---- chat lines
   const rendered = []
@@ -182,6 +190,17 @@ function render() {
     })
   }
   const visible = rendered.slice(-bodyRows)
+
+  // ---- thinking block (above the sidebar, capped so the frame always fits)
+  const think = []
+  if (thinkLines > 0) {
+    const shown = state.thinking.slice(-(thinkLines - 2))
+    think.push(paint(C.accent, '┌─ thinking ' + '─'.repeat(Math.max(0, chatW - 13))))
+    for (const line of shown) {
+      think.push(paint(C.dimmer, '│ ' + cut(line, Math.max(4, chatW - 3))))
+    }
+    think.push(paint(C.accent, '└' + '─'.repeat(Math.max(0, chatW - 2))))
+  }
 
   // ---- sidebar
   const side = []
@@ -231,18 +250,24 @@ function render() {
     chatPane[1] = paint(C.dimmer, '  try: open notepad · read example.com · remind me in 10 min to stretch')
   }
 
+  out.push('\x1b[?25l')            // hide only while repainting
   out.push('\x1b[H')
+  for (let i = 0; i < thinkLines; i++) {
+    out.push(pad(think[i] || '', chatW) + (sideW ? paint(C.dimmer, '│') + ' '.repeat(sideW) : '') + '\r\n')
+  }
   for (let i = 0; i < bodyRows; i++) {
     const left = pad(chatPane[i] || '', chatW)
     const right = side[i] || ''
     out.push(left + (sideW ? paint(C.dimmer, '│') + pad(right, sideW) : '') + '\r\n')
   }
   out.push(paint(C.dimmer, '─'.repeat(cols)) + '\r\n')
-  out.push(pad(' ' + inputLabel + state.input, cols - 1) + '\r\n')
+  // the input row carries no trailing newline, otherwise the terminal scrolls 1 line
+  out.push(pad(' ' + inputLabel + state.input, cols - 1))
 
-  // cursor back onto the input row
-  const cursorCol = 1 + strWidth(inputLabel) + state.pos
-  out.push(`\x1b[${bodyRows + 3};${Math.min(cols, cursorCol + 1)}H`)
+  const inputRow = thinkLines + bodyRows + 2
+  const cursorCol = 2 + strWidth(inputLabel) + state.pos
+  out.push('\x1b[' + inputRow + ';' + Math.max(1, Math.min(cols - 1, cursorCol)) + 'H')
+  out.push('\x1b[?25h')            // cursor visible again, parked on the input row
   process.stdout.write(out.join(''))
 }
 
@@ -286,12 +311,43 @@ async function handle(text) {
 
 async function askAgent(text) {
   state.busy = true
+  state.busySince = Date.now()
   state.status = 'thinking'
+  state.thinking = []
+  const t0 = Date.now()
+  const mark = (m) => {
+    if (!state.trace) return
+    const t = state.showTiming ? '  +' + ((Date.now() - t0) / 1000).toFixed(1) + 's' : ''
+    state.thinking.push(m + t)
+    if (state.thinking.length > 40) state.thinking.shift()
+    scheduleRender()
+  }
+  mark('asking ' + state.model)
   scheduleRender()
   let first = true
   try {
     const res = await bridge.ask(text, {
+      onTrace: (evt) => {
+        if (!state.trace || !evt) return
+        const oneLine = (v) => String(v == null ? '' : (typeof v === 'string' ? v : JSON.stringify(v)))
+          .replace(/\s+/g, ' ').trim().slice(0, 120)
+        const name = oneLine(evt.name || evt.tool || evt.tool_name || evt.toolName)
+        const cmd = evt.input && typeof evt.input === 'object'
+          ? (evt.input.command || evt.input.path || evt.input.query || evt.input.pattern || evt.input.url || '')
+          : ''
+        const arg = oneLine(cmd || evt.command || evt.input || evt.args || evt.arguments || '')
+        if (evt.type === 'tool_use') mark('→ ' + (name || 'tool') + (arg ? ' ' + arg : ''))
+        else if (evt.type === 'tool_result') mark('✓ ' + (name || 'tool') + ' done')
+        else if (evt.type === 'thinking' || evt.type === 'reasoning') {
+          const t = oneLine(evt.text || evt.thinking || evt.reasoning || evt.content)
+          if (t) mark('… ' + t)
+        } else if (evt.type === 'status') {
+          const t = oneLine(evt.status || evt.message || evt.text)
+          if (t) mark('· ' + t)
+        }
+      },
       onDelta: (d) => {
+        if (first && state.trace) mark('first token')
         const last = state.lines[state.lines.length - 1]
         if (first) {
           first = false
@@ -308,6 +364,11 @@ async function askAgent(text) {
         scheduleRender()
       },
       onMeta: (m) => {
+        if (state.trace) {
+          if (m.tokens) mark('tokens ' + m.tokens.input + ' in / ' + m.tokens.output + ' out')
+          if (m.durationMs) mark('model ' + m.durationMs + ' ms')
+          if (m.sessionId) mark('session ' + String(m.sessionId).slice(0, 14))
+        }
         if (m.tokens) {
           state.tokens.lastIn = m.tokens.input || 0
           state.tokens.lastOut = m.tokens.output || 0
@@ -331,8 +392,13 @@ async function askAgent(text) {
     }
   } catch (e) {
     sys('✗ ' + (e && e.message ? e.message : String(e)))
+    mark('failed: ' + (e && e.message ? e.message : String(e)))
   } finally {
+    const total = Date.now() - t0
+    state.lastMs = total
+    mark('answered in ' + (total / 1000).toFixed(1) + 's')
     state.busy = false
+    state.busySince = 0
     state.status = 'ready'
     scheduleRender()
   }
@@ -426,6 +492,8 @@ function fetchPage(url) {
 /* ---------------------------------------------------------------- commands */
 const HELP = [
   ['/help', 'this list'],
+  ['/think [on|off]', 'show or hide the thinking block above the sidebar'],
+  ['/timing [on|off]', 'show or hide per-step timings inside the thinking block'],
   ['/model [name]', 'show or set the model (used for the next new session)'],
   ['/agent [cloud|local]', 'where answers come from'],
   ['/new', 'start a fresh conversation'],
@@ -837,6 +905,22 @@ async function command(raw) {
       break
     }
 
+    case 'think': {
+      if (arg === 'on') state.trace = true
+      else if (arg === 'off') state.trace = false
+      else state.trace = !state.trace
+      sys('thinking ' + (state.trace ? 'ON' : 'OFF'))
+      break
+    }
+
+    case 'timing': {
+      if (arg === 'on') state.showTiming = true
+      else if (arg === 'off') state.showTiming = false
+      else state.showTiming = !state.showTiming
+      sys('timing ' + (state.showTiming ? 'ON' : 'OFF'))
+      break
+    }
+
     case 'notch': {
       const { spawn } = require('child_process')
       spawn('cmd.exe', ['/c', 'start', '', path.join(ROOT, '..', 'jarvis-notch', 'node_modules', '.bin', 'electron.cmd'), '.'], { cwd: path.join(ROOT, '..', 'jarvis-notch'), detached: true, stdio: 'ignore' })
@@ -948,9 +1032,39 @@ async function main() {
     ]
     state.input = 'remind me in 10 min to stretch'
     state.pos = state.input.length
+    if (process.argv.includes('--think')) {
+      state.trace = true
+      state.thinking = [
+        'asking deepseek-v4-flash  +0.0s',
+        'tool terminal echo $((12*12))  +0.4s',
+        'tool done 1 result  +0.9s',
+        'first token  +2.1s',
+        'tokens 13749 in / 2 out  +2.4s',
+        'model 2380 ms  +2.4s',
+        'session local-e323ac  +2.5s',
+        'answered in 2.6s  +2.6s',
+      ]
+    }
     refreshHw()
     render()
     process.stdout.write('\n')
+    return
+  }
+
+  // dev probe: run one real turn headlessly and report what the thinking block held
+  const probeAt = process.argv.indexOf('--probe-turn')
+  if (probeAt > -1) {
+    const q = process.argv[probeAt + 1] || 'what is 6*7? just the number'
+    const orig = process.stdout.write.bind(process.stdout)
+    INTERACTIVE = true
+    process.stdout.write = () => true
+    await askAgent(q)
+    INTERACTIVE = false
+    process.stdout.write = orig
+    const answer = state.lines.filter((l) => l.role === 'jarvis').map((l) => l.text).join(' ').trim()
+    orig('answer: ' + answer.slice(0, 120) + '\n')
+    orig('thinking block (' + (state.thinking ? state.thinking.length : 0) + ' lines):\n')
+    for (const l of state.thinking || []) orig('  ' + l + '\n')
     return
   }
 
