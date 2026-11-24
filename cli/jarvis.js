@@ -79,6 +79,12 @@ const state = {
   busy: false,
   started: Date.now(),
   spin: 0,
+  scroll: 0,           // transcript rows scrolled up from the bottom
+  screen: [],          // plain text of the last painted frame (for selection)
+  sel: null,           // { r1, c1, r2, c2 } screen selection
+  dragging: false,
+  selAll: false,       // whole input line selected
+  lastClick: { at: 0, y: -1 },
   tokens: { lastIn: 0, lastOut: 0, sessionIn: 0, sessionOut: 0, context: 0 },
   hw: { cpu: 0, ram: 0, gpu: null, diskFree: 0, diskTotal: 0 },
   model: config.model || 'session default',
@@ -223,44 +229,58 @@ function startTempPolling() {
 /* ---------------------------------------------------------------- rendering */
 let lastRender = 0
 let renderTimer = null
-const SPINNER = ['◐','◓','◑','◒']
-let spinTimer = null
-function startSpinner() {
-  if (spinTimer) return
-  state.spin = 0
-  spinTimer = setInterval(() => {
-    if (!state.busy) { clearInterval(spinTimer); spinTimer = null; return }
-    state.spin = (state.spin + 1) % 4
-    // AGENT is the 6th sidebar row (0-based index 5). In the terminal it's at
-    // thinkLines + 5 (header rows) + 1 (1-based escape code) = thinkLines + 6
-    // But we don't have thinkLines here, so use the known constant offset
-    // when sidebar is at top: row 6. The full render handles alignment.
-    const esc = ''
-    const row = 6
-    const col = 12 // after 'AGENT    ' (10 chars padded)
-    process.stdout.write(esc + '[' + row + ';' + col + 'H' + SPINNER[state.spin])
-  }, 120)
-}
-function stopSpinner() {
-  if (spinTimer) { clearInterval(spinTimer); spinTimer = null }
-  // restore the two spaces after AGENT
-  if (!state.busy) {
-    const esc = ''
-    const row = 6
-    const col = 12
-    process.stdout.write(esc + '[' + row + ';' + col + 'H' + '  ')
-  }
-}
 function scheduleRender() {
   if (renderTimer) return
-  if (state.busy && !spinTimer) startSpinner()
-  if (!state.busy && spinTimer) stopSpinner()
-  const wait = Math.max(0, 80 - (Date.now() - lastRender))
+  if (state.busy) state.spin = (state.spin + 1) % 4   // galaxy rotation
+  const wait = Math.max(0, state.busy ? 140 : 80 - (Date.now() - lastRender))
   renderTimer = setTimeout(() => { renderTimer = null; render() }, wait)
 }
 
 let INTERACTIVE = true
+let SCR = null          // lib/screen.mjs, loaded in main()
+let KEYS = null         // lib/keys.mjs, loaded in main()
 
+/* ------------------------------------------------------------------- art */
+/* The galaxy is the busy indicator and the empty-state identity: big and blue,
+ * no box, nothing at the top of the frame. */
+const GALAXY = [
+  ['      \u00b7    \u2726      ',
+   '   \u2726  \u2584\u2588\u2588\u2588\u2584    ',
+   '  \u00b7  \u2588\u2588\u2588\u2588\u2588\u2588\u2588  \u00b7 ',
+   '   \u2726  \u2580\u2588\u2588\u2588\u2580    ',
+   '      \u00b7    \u2726      '],
+  ['   \u00b7       \u2726     ',
+   '      \u2584\u2588\u2588\u2588\u2584 \u2726  ',
+   '  \u2726 \u2588\u2588\u2588\u2588\u2588\u2588\u2588   \u00b7',
+   '      \u2580\u2588\u2588\u2588\u2580    ',
+   '   \u2726      \u00b7      '],
+  ['      \u2726    \u00b7      ',
+   '   \u00b7  \u2584\u2588\u2588\u2588\u2584    ',
+   '  \u2726  \u2588\u2588\u2588\u2588\u2588\u2588\u2588 \u2726 ',
+   '   \u00b7  \u2580\u2588\u2588\u2588\u2580    ',
+   '      \u2726    \u00b7      '],
+  ['   \u2726       \u00b7     ',
+   '  \u00b7   \u2584\u2588\u2588\u2588\u2584   \u2726 ',
+   '     \u2588\u2588\u2588\u2588\u2588\u2588\u2588 \u00b7  ',
+   '  \u2726   \u2580\u2588\u2588\u2588\u2580    ',
+   '   \u00b7       \u2726     '],
+]
+
+const BANNER = [
+  '  \u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2557   \u2588\u2588\u2557\u2588\u2588\u2557\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557',
+  '  \u2588\u2588\u2551\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u2588\u2588\u2551   \u2588\u2588\u2551\u2588\u2588\u2551\u2588\u2588\u2554\u2550\u2550\u2550\u2550\u255d',
+  '  \u2588\u2588\u2551\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551\u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255d\u2588\u2588\u2551   \u2588\u2588\u2551\u2588\u2588\u2551\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557',
+  '\u2588\u2588\u2557\u2588\u2588\u2551\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2551\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u255a\u2588\u2588\u2557 \u2588\u2588\u2554\u255d\u2588\u2588\u2551\u255a\u2550\u2550\u2550\u2550\u2588\u2588\u2551',
+  '\u255a\u2588\u2588\u2588\u2588\u2588\u2554\u255d\u2588\u2588\u2551  \u2588\u2588\u2551\u2588\u2588\u2551  \u2588\u2588\u2551 \u255a\u2588\u2588\u2588\u2588\u2554\u255d \u2588\u2588\u2551\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551',
+  ' \u255a\u2550\u2550\u2550\u2550\u255d \u255a\u2550\u255d  \u255a\u2550\u255d\u255a\u2550\u255d  \u255a\u2550\u255d  \u255a\u2550\u2550\u2550\u255d  \u255a\u2550\u255d\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d',
+]
+
+function galaxyRows(width) {
+  const frame = GALAXY[state.spin % GALAXY.length]
+  return frame.map((l) => ({ art: paint(C.accent, cut(l, width)) }))
+}
+
+/* ----------------------------------------------------------------- render */
 function render() {
   if (!INTERACTIVE) return
   lastRender = Date.now()
@@ -268,71 +288,88 @@ function render() {
   const rows = process.stdout.rows || 30
   const sideW = cols >= 92 ? 34 : 0
   const chatW = cols - sideW - 3
-  // reserve rows for the thinking block: if the frame is taller than the window the
-  // terminal scrolls on every repaint, which is the fast black-screen flicker
-  const thinkLines = (state.trace && state.thinking && state.thinking.length)
-    ? Math.min(state.thinking.length, Math.max(0, Math.min(6, Math.floor((rows - 9) / 3))))
-    : 0
-  const bodyRows = rows - 3 - thinkLines
+  const bodyRows = rows - 3          // rule + input + one spare, never more
   if (bodyRows < 5) return
 
-  // ---- chat lines
-  const rendered = []
-  for (const l of state.lines) {
-    const isYou = l.role === 'you'
-    const isSys = l.role === 'sys'
-    const head = isYou ? paint(C.dimmer, 'you ') + paint(C.accent, '› ') : isSys ? '    ' : '      '
-    const color = isYou ? C.steel : isSys ? C.dimmer : C.bright
-    const avail = chatW - strWidth(head)
-    const wrapped = wrap(l.text, Math.max(8, avail))
-    wrapped.forEach((w, i) => {
-      rendered.push({ head: i === 0 ? head : ' '.repeat(strWidth(head)), text: paint(color, w) })
-    })
-  }
-  const visible = rendered.slice(-bodyRows)
+  // ---- build every transcript row, remembering which line it came from
+  const all = []
+  const push = (head, text, color, src, plain) => all.push({ head, text, color, src, plain })
 
-  // ---- thinking block (above the sidebar, capped so the frame always fits)
-  const think = []
-  if (thinkLines > 0) {
-    const shown = state.thinking.slice(-(thinkLines - 2))
-    think.push(paint(C.accent, '┌─ thinking ' + '─'.repeat(Math.max(0, chatW - 13))))
-    for (const line of shown) {
-      think.push(paint(C.dimmer, '│ ' + cut(line, Math.max(4, chatW - 3))))
+  if (!state.lines.length) {
+    for (let b = 0; b < BANNER.length; b++) push('', paint(C.accent, C.bold + cut(BANNER[b], chatW)), null, -1, cut(BANNER[b], chatW))
+    push('', '', null, -1, '')
+    for (const g of galaxyRows(chatW)) push('', g.art, null, -1, '')
+    push('', paint(C.dimmer, '  type a question, or ') + paint(C.accent, '/help') + paint(C.dimmer, '   ·   open notepad · read example.com'), null, -1, '')
+  } else {
+    for (let li = 0; li < state.lines.length; li++) {
+      const l = state.lines[li]
+      if (l.role === 'galaxy') continue
+      let head = '      '
+      let color = C.bright
+      if (l.role === 'you') { head = paint(C.dimmer, 'you ') + paint(C.accent, '\u203a '); color = C.steel }
+      else if (l.role === 'sys') { head = '    '; color = C.dimmer }
+      else if (l.role === 'think') { head = paint(C.accent, '  \u2503 '); color = C.steel }
+      else if (l.role === 'meta') { head = '    '; color = C.dimmer }
+      const avail = Math.max(8, chatW - strWidth(head))
+      const wrapped = wrap(l.text, avail)
+      const plainHead = head.replace(/\x1b\[[0-9;]*m/g, '')
+      for (let w = 0; w < wrapped.length; w++) {
+        const h = w === 0 ? head : ' '.repeat(strWidth(head))
+        push(w === 0 ? head : ' '.repeat(strWidth(head)), paint(color, wrapped[w]), null, li,
+             (w === 0 ? plainHead : ' '.repeat(strWidth(head))) + wrapped[w])
+      }
     }
-    think.push(paint(C.accent, '└' + '─'.repeat(Math.max(0, chatW - 2))))
   }
+
+  // ---- the thinking galaxy sits at the end of the transcript, not in a box
+  if (state.busy) {
+    for (const g of galaxyRows(chatW)) {
+      const plainArt = g.art.replace(/\x1b\[[0-9;]*m/g, '')
+      push('', g.art, null, -1, plainArt)
+    }
+  }
+
+  // ---- viewport
+  const total = all.length
+  const scroll = SCR ? SCR.clampScroll(state.scroll, total, bodyRows) : Math.max(0, Math.min(Math.max(0, total - bodyRows), state.scroll))
+  state.scroll = scroll
+  const end = total - scroll
+  const start = Math.max(0, end - bodyRows)
+  const visible = all.slice(start, end)
+  state.rowSrc = visible.map((r) => (r ? r.src : -2))
+  state.chatW = chatW
 
   // ---- sidebar
   const side = []
-  const rule = paint(C.dimmer, '─'.repeat(sideW - 2))
+  const rule = paint(C.dimmer, '\u2500'.repeat(Math.max(0, sideW - 2)))
   const kv = (k, v) => side.push(' ' + paint(C.dimmer, pad(k, 10)) + pad(v, sideW - 13))
   side.push(paint(C.accent, C.bold + ' JARVIS') + paint(C.dimmer, '  ' + new Date().toTimeString().slice(0, 5)))
   side.push(rule)
   side.push(' ' + paint(C.dimmer, 'MODEL'))
   side.push(' ' + paint(C.bright, cut(state.model, sideW - 3)))
   side.push(' ' + paint(C.dimmer, 'PROVIDER ') + paint(C.steel, cut(state.provider, sideW - 13)))
-  const spinChar = state.busy ? paint(C.amber, SPINNER[state.spin]) + ' ' : '  '
-  side.push(' ' + paint(C.dimmer, 'AGENT    ') + spinChar + paint(state.busy ? C.amber : C.green, state.busy ? 'working' : 'idle'))
+  const elapsed = state.busy && state.busySince ? ((Date.now() - state.busySince) / 1000).toFixed(1) + 's' : ''
+  side.push(' ' + paint(C.dimmer, 'AGENT    ') + paint(state.busy ? C.amber : C.green, state.busy ? 'working ' + elapsed : 'idle'))
   side.push(' ' + paint(C.dimmer, 'SESSION  ') + paint(C.steel, cut(state.session, sideW - 13)))
   side.push(rule)
   side.push(' ' + paint(C.dimmer, 'TOKENS'))
   kv('turn in', String(state.tokens.lastIn))
   kv('turn out', String(state.tokens.lastOut))
   kv('session', state.tokens.sessionIn + ' / ' + state.tokens.sessionOut)
-  kv('context', state.tokens.context ? (state.tokens.context / 1000).toFixed(1) + 'k' : '—')
+  kv('context', state.tokens.context ? (state.tokens.context / 1000).toFixed(1) + 'k' : '\u2014')
   side.push(rule)
   side.push(' ' + paint(C.dimmer, 'HARDWARE'))
   side.push(' ' + paint(C.dimmer, 'CPU ') + bar(state.hw.cpu, 10) + ' ' +
     paint(C.steel, Math.round(state.hw.cpu) + '%') +
-    (state.hw.cpuTemp != null ? ' ' + paint(C.steel, Math.round(state.hw.cpuTemp) + '°C') : ''))
+    (state.hw.cpuTemp != null ? ' ' + paint(C.steel, Math.round(state.hw.cpuTemp) + '\u00b0C') : ''))
   side.push(' ' + paint(C.dimmer, 'RAM ') + bar(state.hw.ram, 10) + ' ' + paint(C.steel, Math.round(state.hw.ram) + '%'))
-  const gpu = state.hw.gpuTemp != null ? Math.round(state.hw.gpuTemp) + '°C' : 'n/a'
+  const gpu = state.hw.gpuTemp != null ? Math.round(state.hw.gpuTemp) + '\u00b0C' : 'n/a'
   const gpuUtil = state.hw.gpuUtil != null ? ' ' + state.hw.gpuUtil + '%' : ''
   const gpuName = state.hw.gpuName ? ' ' + state.hw.gpuName : ''
   side.push(' ' + paint(C.dimmer, 'GPU') + gpuName + ' ' + paint(C.steel, gpu + gpuUtil))
-  if (state.hw.diskTemp != null) side.push(' ' + paint(C.dimmer, 'SSD ') + paint(C.steel, Math.round(state.hw.diskTemp) + '°C'))
+  if (state.hw.diskTemp != null) side.push(' ' + paint(C.dimmer, 'SSD ') + paint(C.steel, Math.round(state.hw.diskTemp) + '\u00b0C'))
   const diskUsed = state.hw.diskTotal ? 100 * (1 - state.hw.diskFree / state.hw.diskTotal) : 0
-  side.push(' ' + paint(C.dimmer, 'DISK') + ' ' + paint(C.steel, diskUsed ? Math.round(diskUsed) + '% used' : '—'))
+  side.push(' ' + paint(C.dimmer, 'DISK') + ' ' + paint(C.steel, diskUsed ? Math.round(diskUsed) + '% used' : '\u2014'))
   side.push(rule)
   const rem = readList(REMINDER_FILE).filter((r) => r.at > Date.now()).length
   kv('reminders', String(rem))
@@ -340,53 +377,74 @@ function render() {
   kv('uptime', Math.round((Date.now() - state.started) / 60000) + ' min')
 
   // ---- input line
-  const inputLabel = state.busy ? paint(C.amber, '… ') : paint(C.accent, '› ')
-  const hint = state.busy
-    ? paint(C.dimmer, 'esc stops · enter queues')
-    : paint(C.dimmer, '/help for commands')
+  const inputLabel = state.busy ? paint(C.amber, '\u2026 ') : paint(C.accent, '\u203a ')
+  let hint = state.busy ? paint(C.dimmer, 'esc stops \u00b7 enter queues') : paint(C.dimmer, '/help for commands')
+  if (scroll > 0) hint = paint(C.amber, '\u2191 ' + scroll + ' lines \u00b7 End jumps to the bottom')
+  if (state.selAll) hint = paint(C.amber, 'all selected \u00b7 type to replace')
 
   // ---- compose
   const out = []
-  const chatPane = []
-  for (let i = 0; i < bodyRows; i++) {
-    const l = visible[i]
-    chatPane.push(l ? cut(l.head + l.text, chatW) : '')
-  }
-  if (!state.lines.length) {
-    chatPane[0] = paint(C.bright, '  Jarvis. Type a question, or a command — ') + paint(C.accent, '/help')
-    chatPane[1] = paint(C.dimmer, '  try: open notepad · read example.com · remind me in 10 min to stretch')
-  }
-
-  out.push('\x1b[?25l')            // hide only while repainting
+  const screen = []
+  out.push('\x1b[?25l')
   out.push('\x1b[H')
-  for (let i = 0; i < thinkLines; i++) {
-    out.push(pad(think[i] || '', chatW) + (sideW ? paint(C.dimmer, '│') + ' '.repeat(sideW) : '') + '\r\n')
+  for (let r = 0; r < bodyRows; r++) {
+    const row = visible[r]
+    const left = row ? pad(cut(row.head + row.text, chatW), chatW) : ' '.repeat(chatW)
+    const right = side[r] || ''
+    out.push(left + (sideW ? paint(C.dimmer, '\u2502') + pad(right, sideW) : '') + '\r\n')
+    const plainLeft = row ? cut(row.plain, chatW) : ''
+    const plainRight = right ? right.replace(/\x1b\[[0-9;]*m/g, '') : ''
+    screen.push(pad(plainLeft, chatW) + (sideW ? '\u2502' + pad(plainRight, sideW) : ''))
   }
-  for (let i = 0; i < bodyRows; i++) {
-    const left = pad(chatPane[i] || '', chatW)
-    const right = side[i] || ''
-    out.push(left + (sideW ? paint(C.dimmer, '│') + pad(right, sideW) : '') + '\r\n')
+  out.push(paint(C.dimmer, '\u2500'.repeat(cols)) + '\r\n')
+  const inputStart = 1 + strWidth(inputLabel)
+  const inputText = state.input
+  if (state.selAll && inputText) {
+    out.push(pad(' ' + inputLabel + '\x1b[7m' + inputText + '\x1b[0m', cols - 1))
+  } else {
+    out.push(pad(' ' + inputLabel + inputText, cols - 1))
   }
-  out.push(paint(C.dimmer, '─'.repeat(cols)) + '\r\n')
-  // the input row carries no trailing newline, otherwise the terminal scrolls 1 line
-  out.push(pad(' ' + inputLabel + state.input, cols - 1))
+  screen.push((' ' + inputLabel + inputText).replace(/\x1b\[[0-9;]*m/g, ''))
+  state.screen = screen
 
-  const inputRow = thinkLines + bodyRows + 2
-  const cursorCol = 2 + strWidth(inputLabel) + state.pos
+  // ---- paint the selection on top of the frame
+  const sel = state.sel
+  if (sel && sel.r1 != null) {
+    const a = Math.min(sel.r1, sel.r2)
+    const b = Math.max(sel.r1, sel.r2)
+    for (let r = a; r <= b; r++) {
+      const line = screen[r - 1]
+      if (!line) continue
+      const from = (r === sel.r1 && a === sel.r1) ? Math.max(0, sel.c1 - 1) : 0
+      const to = (r === sel.r2) ? Math.max(0, sel.c2) : line.length
+      const piece = line.slice(from, Math.max(from, to))
+      if (!piece.trim()) continue
+      out.push('\x1b[' + r + ';' + (from + 1) + 'H' + '\x1b[7m' + piece + '\x1b[0m')
+    }
+  }
+
+  const inputRow = bodyRows + 2
+  // right-aligned hint: scroll position, selection state, or /help
+  const hintPlain = hint.replace(/\x1b\[[0-9;]*m/g, '')
+  const hintCol = cols - strWidth(hintPlain) - 1
+  if (hintCol > inputStart + strWidth(inputText) + 2) {
+    out.push('\x1b[' + inputRow + ';' + hintCol + 'H' + hint)
+  }
+  const cursorCol = inputStart + state.pos
   out.push('\x1b[' + inputRow + ';' + Math.max(1, Math.min(cols - 1, cursorCol)) + 'H')
-  out.push('\x1b[?25h')            // cursor visible again, parked on the input row
+  out.push('\x1b[?25h')
   process.stdout.write(out.join(''))
 }
 
 /* ------------------------------------------------------------- input line */
 const stdin = process.stdin
-readline.emitKeypressEvents(stdin)
 
 function submit() {
   const text = state.input.trim()
   if (!text) return
   state.input = ''
   state.pos = 0
+  state.selAll = false
   if (state.history[state.history.length - 1] !== text) state.history.push(text)
   state.histAt = -1
   handle(text)
@@ -422,11 +480,13 @@ async function askAgent(text) {
   state.status = 'thinking'
   state.thinking = []
   const t0 = Date.now()
+  let answered = false
+  const post = []
   const mark = (m) => {
     if (!state.trace) return
-    const t = state.showTiming ? '  +' + ((Date.now() - t0) / 1000).toFixed(1) + 's' : ''
-    state.thinking.push(m + t)
-    if (state.thinking.length > 40) state.thinking.shift()
+    const secs = ((Date.now() - t0) / 1000).toFixed(1)
+    if (answered) { post.push(m); return }      // keep the answer clean
+    addLine('think', m + (state.showTiming ? '  +' + secs + 's' : ''))
     scheduleRender()
   }
   mark('asking ' + state.model)
@@ -455,10 +515,12 @@ async function askAgent(text) {
       },
       onDelta: (d) => {
         if (first && state.trace) mark('first token')
+        const clean = first ? String(d).replace(/^\n+/, '') : d
         const last = state.lines[state.lines.length - 1]
         if (first) {
           first = false
-          state.lines.push({ role: 'jarvis', text: d, streaming: true })
+          answered = true
+          state.lines.push({ role: 'jarvis', text: clean, streaming: true })
         } else if (last && last.streaming) {
           last.text += d
         } else {
@@ -502,8 +564,13 @@ async function askAgent(text) {
     mark('failed: ' + (e && e.message ? e.message : String(e)))
   } finally {
     const total = Date.now() - t0
+    const modelMs = state.lastMs && state.lastMs !== total ? state.lastMs : 0
     state.lastMs = total
-    mark('answered in ' + (total / 1000).toFixed(1) + 's')
+    const bits = ['\u23f1 ' + (total / 1000).toFixed(1) + 's']
+    if (state.tokens.lastIn) bits.push(state.tokens.lastIn + ' in / ' + state.tokens.lastOut + ' out')
+    if (modelMs) bits.push('model ' + (modelMs / 1000).toFixed(1) + 's')
+    bits.push(new Date().toTimeString().slice(0, 8))
+    addLine('meta', bits.join('   \u00b7   '))
     state.busy = false
     state.busySince = 0
     state.status = 'ready'
@@ -1045,65 +1112,176 @@ async function command(raw) {
 function draw() { render() }
 
 function quit() {
-  process.stdout.write('\x1b[?25h\x1b[?1049l')
+  const off = KEYS ? KEYS.MOUSE_OFF + KEYS.PASTE_OFF : ''
+  process.stdout.write(off + '\x1b[?25h\x1b[?1049l')
   process.exit(0)
 }
 
-function onKey(str, key) {
-  if (!key) return
-  const k = key.name
+function clearSel() {
+  state.sel = null
+  state.selAll = false
+  state.dragging = false
+}
 
-  if (key.ctrl && k === 'c') { if (state.busy) { bridge.cancel(); sys('stopped'); state.busy = false; scheduleRender(); return } return quit() }
-  if (key.ctrl && k === 'l') { process.stdout.write('\x1b[2J'); return scheduleRender() }
+function scrollBy(n) {
+  state.scroll = Math.max(0, state.scroll + n)
+  scheduleRender()
+}
 
-  if (k === 'escape') {
-    if (state.busy) { bridge.cancel(); state.busy = false; state.status = 'ready'; sys('stopped') }
-    else { state.input = ''; state.pos = 0 }
+/* right click on a highlighted block -> clipboard */
+function copySelection() {
+  const sel = state.sel
+  if (!sel) return false
+  const text = SCR ? SCR.selectionText(state.screen, sel) : ''
+  if (!text.trim()) return false
+  try {
+    const tmp = path.join(os.tmpdir(), 'jarvis-clip-' + process.pid + '.txt')
+    fs.writeFileSync(tmp, text, 'utf8')
+    execFile('powershell', ['-NoProfile', '-Command',
+      "Get-Content -Raw -LiteralPath '" + tmp + "' | Set-Clipboard"],
+      { windowsHide: true, timeout: 8000 }, () => {
+        try { fs.unlinkSync(tmp) } catch {}
+      })
+    sys(paint(C.green, '\u2713 copied ' + text.length + ' chars \u2014 right click again to copy another block'))
+  } catch (e) {
+    sys('copy failed: ' + (e && e.message ? e.message : e))
+  }
+  scheduleRender()
+  return true
+}
+
+/* double click selects the whole entry under the pointer */
+function selectBlockAt(row) {
+  const src = state.rowSrc && state.rowSrc[row - 1]
+  if (src == null || src < 0) return false
+  let a = row
+  let b = row
+  while (a > 1 && state.rowSrc[a - 2] === src) a--
+  while (b < state.rowSrc.length && state.rowSrc[b] === src) b++
+  const lastLine = state.screen[b - 1] || ''
+  const limit = Math.min(lastLine.length, state.chatW || lastLine.length)
+  const end = Math.max(1, lastLine.slice(0, limit).replace(/\s+$/, '').length)
+  state.sel = { r1: a, c1: 1, r2: b, c2: end }
+  scheduleRender()
+  return true
+}
+
+function onMouse(ev) {
+  const b = ev.button
+  if (b === 'wheelup') return scrollBy(3)
+  if (b === 'wheeldown') return scrollBy(-3)
+  if (b === 'left') {
+    const now = Date.now()
+    const dbl = now - state.lastClick.at < 400 && state.lastClick.y === ev.y
+    state.lastClick = { at: now, y: ev.y }
+    if (dbl && selectBlockAt(ev.y)) return
+    state.dragging = true
+    state.sel = { r1: ev.y, c1: ev.x, r2: ev.y, c2: ev.x }
+    return scheduleRender()
+  }
+  if (b === 'motion') {
+    if (!state.dragging || !state.sel) return
+    state.sel.r2 = ev.y
+    state.sel.c2 = ev.x
+    return scheduleRender()
+  }
+  if (b === 'release') { state.dragging = false; return }
+  if (b === 'right') return copySelection()
+}
+
+function insertText(v) {
+  if (state.selAll) {
+    state.input = v
+    state.pos = v.length
+    state.selAll = false
+    return scheduleRender()
+  }
+  state.input = state.input.slice(0, state.pos) + v + state.input.slice(state.pos)
+  state.pos += v.length
+  scheduleRender()
+}
+
+function onEvent(ev) {
+  if (!ev || !ev.type) return
+  const t = ev.type
+
+  if (t === 'ctrl') {
+    if (ev.key === 'c') {
+      if (state.busy) { bridge.cancel(); state.busy = false; state.status = 'ready'; sys('stopped'); return scheduleRender() }
+      return quit()
+    }
+    if (ev.key === 'l') { process.stdout.write('\x1b[2J'); return scheduleRender() }
+    if (ev.key === 'a') { state.selAll = !!state.input.length; return scheduleRender() }
+    if (ev.key === 'e') { state.pos = state.input.length; state.selAll = false; return scheduleRender() }
+    if (ev.key === 'u') { state.input = ''; state.pos = 0; state.selAll = false; return scheduleRender() }
+    return
+  }
+
+  if (t === 'esc') {
+    if (state.busy) {
+      bridge.cancel(); state.busy = false; state.status = 'ready'; sys('stopped')
+    } else if (state.sel) {
+      clearSel()
+    } else if (state.scroll) {
+      state.scroll = 0
+    } else {
+      state.input = ''; state.pos = 0; state.selAll = false
+    }
     return scheduleRender()
   }
 
-  if (k === 'return' || k === 'enter') { submit(); return }
+  if (t === 'enter') return submit()
 
-  if (k === 'backspace') {
+  if (t === 'backspace') {
+    if (state.selAll) { state.input = ''; state.pos = 0; state.selAll = false; return scheduleRender() }
     if (state.pos > 0) { state.input = state.input.slice(0, state.pos - 1) + state.input.slice(state.pos); state.pos-- }
     return scheduleRender()
   }
-  if (k === 'delete') {
+  if (t === 'delete') {
+    if (state.selAll) { state.input = ''; state.pos = 0; state.selAll = false; return scheduleRender() }
     state.input = state.input.slice(0, state.pos) + state.input.slice(state.pos + 1)
     return scheduleRender()
   }
-  if (k === 'left') { state.pos = Math.max(0, state.pos - 1); return scheduleRender() }
-  if (k === 'right') { state.pos = Math.min(state.input.length, state.pos + 1); return scheduleRender() }
-  if (k === 'home' || (key.ctrl && k === 'a')) { state.pos = 0; return scheduleRender() }
-  if (k === 'end' || (key.ctrl && k === 'e')) { state.pos = state.input.length; return scheduleRender() }
+  if (t === 'left') { state.selAll = false; state.pos = Math.max(0, state.pos - 1); return scheduleRender() }
+  if (t === 'right') { state.selAll = false; state.pos = Math.min(state.input.length, state.pos + 1); return scheduleRender() }
+  if (t === 'home') { state.selAll = false; state.pos = 0; return scheduleRender() }
+  if (t === 'end') { state.selAll = false; state.pos = state.input.length; state.scroll = 0; return scheduleRender() }
 
-  if (k === 'up') {
+  if (t === 'up') {
     if (!state.history.length) return
     if (state.histAt === -1) state.histAt = state.history.length
     state.histAt = Math.max(0, state.histAt - 1)
     state.input = state.history[state.histAt] || ''
     state.pos = state.input.length
+    state.selAll = false
     return scheduleRender()
   }
-  if (k === 'down') {
+  if (t === 'down') {
     if (state.histAt === -1) return
     state.histAt = Math.min(state.history.length, state.histAt + 1)
     state.input = state.histAt === state.history.length ? '' : state.history[state.histAt]
     state.pos = state.input.length
+    state.selAll = false
     return scheduleRender()
   }
 
-  if (str && !key.ctrl && !key.meta && str >= ' ') {
-    state.input = state.input.slice(0, state.pos) + str + state.input.slice(state.pos)
-    state.pos += str.length
-    return scheduleRender()
+  if (t === 'pgup') return scrollBy(8)
+  if (t === 'pgdown' || t === 'pgdn') return scrollBy(-8)
+
+  if (t === 'text') return insertText(ev.value)
+  if (t === 'paste') {
+    const one = SCR ? SCR.pasteLine(ev.value) : String(ev.value).replace(/\s+/g, ' ').trim()
+    return insertText(one)
   }
+  if (t === 'mouse') return onMouse(ev)
 }
 
 /* --------------------------------------------------------------------- boot */
 async function main() {
   // ESM helpers
   const intentMod = await import(pathToFileUrl(path.join(ROOT, 'lib', 'intent.mjs')))
+  SCR = await import(pathToFileUrl(path.join(ROOT, 'lib', 'screen.mjs')))
+  KEYS = await import(pathToFileUrl(path.join(ROOT, 'lib', 'keys.mjs')))
   const remMod = await import(pathToFileUrl(path.join(ROOT, 'lib', 'reminders.mjs')))
   intentLib.parseIntent = intentMod.parseIntent
   remindersLib.parseReminder = remMod.parseReminder
@@ -1121,24 +1299,36 @@ async function main() {
 
   const frameOnly = process.argv.includes('--frame')
   if (frameOnly) {
-    Object.defineProperty(process.stdout, 'columns', { value: 120, configurable: true })
-    Object.defineProperty(process.stdout, 'rows', { value: 30, configurable: true })
+    const sizeAt = process.argv.indexOf('--size')
+    const size = sizeAt > -1 ? String(process.argv[sizeAt + 1] || '120x30').split('x') : ['120', '30']
+    Object.defineProperty(process.stdout, 'columns', { value: Number(size[0]) || 120, configurable: true })
+    Object.defineProperty(process.stdout, 'rows', { value: Number(size[1]) || 30, configurable: true })
     INTERACTIVE = true
     state.model = 'deepseek-v4-flash'
     state.provider = 'custom:swm'
     state.session = 'local-e323ac'
     state.tokens = { lastIn: 13328, lastOut: 162, sessionIn: 41825, sessionOut: 640, context: 27724 }
-    state.lines = [
-      { role: 'sys', text: 'Jarvis · terminal · /help for commands' },
+    const demo = [
+      { role: 'sys', text: 'Jarvis \u00b7 terminal \u00b7 /help for commands' },
+      { role: 'you', text: 'how much disk is free on C:?' },
+      { role: 'think', text: 'asking deepseek-v4-flash  +0.0s' },
+      { role: 'think', text: '\u2192 terminal df -h /c  +6.5s' },
+      { role: 'think', text: '\u2713 terminal done  +7.5s' },
+      { role: 'think', text: 'first token  +9.7s' },
+      { role: 'jarvis', text: '794G free on C: (208G used of 1002G, 21%).' },
+      { role: 'meta', text: '\u23f1 10.1s   \u00b7   28127 in / 82 out   \u00b7   model 7.4s   \u00b7   15:26:14' },
       { role: 'you', text: 'open notepad' },
-      { role: 'sys', text: '→ launched notepad' },
-      { role: 'you', text: 'read example.com and summarize it' },
-      { role: 'jarvis', text: '- Example Domain is a placeholder reserved for documentation examples and needs no permission.' },
-      { role: 'jarvis', text: '- It exists so authors can use a link in samples without asking anyone first.' },
-      { role: 'jarvis', text: '- Nothing is served beyond that page; do not expect a real service there.' },
+      { role: 'sys', text: '\u2192 launched notepad' },
     ]
+    for (let k = 0; k < 40; k++) demo.push({ role: k % 2 ? 'jarvis' : 'you', text: 'filler line ' + k + ' to make the transcript scrollable' })
+    state.lines = process.argv.includes('--empty') ? [] : demo
     state.input = 'remind me in 10 min to stretch'
     state.pos = state.input.length
+    const scrollAt = process.argv.indexOf('--scroll')
+    if (scrollAt > -1) state.scroll = Number(process.argv[scrollAt + 1] || 10) || 10
+    if (process.argv.includes('--sel')) state.sel = { r1: 2, c1: 1, r2: 3, c2: 24 }
+    if (process.argv.includes('--selall')) state.selAll = true
+    if (process.argv.includes('--busy')) { state.busy = true; state.busySince = Date.now() - 4200 }
     if (process.argv.includes('--think')) {
       state.trace = true
       state.thinking = [
@@ -1168,10 +1358,50 @@ async function main() {
     await askAgent(q)
     INTERACTIVE = false
     process.stdout.write = orig
-    const answer = state.lines.filter((l) => l.role === 'jarvis').map((l) => l.text).join(' ').trim()
-    orig('answer: ' + answer.slice(0, 120) + '\n')
-    orig('thinking block (' + (state.thinking ? state.thinking.length : 0) + ' lines):\n')
-    for (const l of state.thinking || []) orig('  ' + l + '\n')
+    orig('transcript:\n')
+    for (const l of state.lines) orig('  [' + l.role.padEnd(6) + '] ' + l.text.slice(0, 100) + '\n')
+    return
+  }
+
+  // dev probe: drive the real event handlers headlessly and report the state
+  const inputAt = process.argv.indexOf('--probe-input')
+  if (inputAt > -1) {
+    const orig = process.stdout.write.bind(process.stdout)
+    INTERACTIVE = true
+    process.stdout.write = () => true
+    state.lines = [
+      { role: 'you', text: 'first question' },
+      { role: 'think', text: 'asking deepseek-v4-flash  +0.0s' },
+      { role: 'jarvis', text: 'first answer line one' },
+      { role: 'jarvis', text: 'first answer line two' },
+      { role: 'you', text: 'second question' },
+    ]
+    render()
+    const out = {}
+    insertText('hello')
+    out.typed = state.input
+    onEvent({ type: 'paste', value: 'line one\nline two\nline three' })
+    out.afterPaste = state.input
+    out.pasteIsOneLine = !out.afterPaste.includes('\n')
+    onEvent({ type: 'ctrl', key: 'a' })
+    out.selAll = state.selAll
+    insertText('replaced')
+    out.afterReplace = state.input
+    out.selAllCleared = state.selAll === false
+    onEvent({ type: 'pgup' })
+    out.scrollAfterPgUp = state.scroll
+    onMouse({ button: 'wheelup', x: 5, y: 5 })
+    out.scrollAfterWheel = state.scroll
+    onMouse({ button: 'left', x: 3, y: 1 })
+    onMouse({ button: 'left', x: 3, y: 1 })
+    out.blockSel = state.sel
+    out.blockText = SCR ? SCR.selectionText(state.screen, state.sel) : null
+    onEvent({ type: 'esc' })
+    out.escClearedSelection = state.sel === null
+    out.screenRows = state.screen.length
+    process.stdout.write = orig
+    INTERACTIVE = false
+    orig(JSON.stringify(out) + '\n')
     return
   }
 
@@ -1207,8 +1437,12 @@ async function main() {
   process.stdin.setRawMode(true)
   process.stdin.resume()
   process.stdin.setEncoding('utf8')
-  process.stdin.on('keypress', onKey)
-  process.stdout.on('resize', () => scheduleRender())
+  if (KEYS) process.stdout.write(KEYS.MOUSE_ON + KEYS.PASTE_ON)
+  process.stdin.on('data', (buf) => {
+    if (!KEYS) return
+    for (const e of KEYS.parseInput(String(buf))) onEvent(e)
+  })
+  process.stdout.on('resize', () => { state.sel = null; state.scroll = 0; scheduleRender() })
   render()
 }
 
