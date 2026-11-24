@@ -303,6 +303,10 @@ async function askAgent(text) {
         }
         scheduleRender()
       },
+      onLearn: (facts) => {
+        for (const f of facts) sys(paint(C.violet, 'learned: ') + f)
+        scheduleRender()
+      },
       onMeta: (m) => {
         if (m.tokens) {
           state.tokens.lastIn = m.tokens.input || 0
@@ -446,6 +450,13 @@ const HELP = [
   ['/find <term>', 'search notification history'],
   ['/summarize [term]', 'summarise the last search or the recent messages'],
   ['/skill save <name>', 'write a skill from what we just did'],
+  ['/skill auto [name]', 'let the local model write the skill'],
+  ['/summary', 'summarise this session (local model)'],
+  ['/sessions', 'session notes on disk'],
+  ['/remember <fact>', 'store a fact about you'],
+  ['/recall [term]', 'what it knows, or search it'],
+  ['/models', 'local Ollama models'],
+  ['/local on|off', 'answer from the local model only'],
   ['/skills · /skill show|rm <name>', 'manage self-written skills'],
   ['/profile', 'what Jarvis learned about your style'],
   ['/notch', 'start the monitoring notch'],
@@ -726,6 +737,15 @@ async function command(raw) {
         sys(paint(C.dimmer, 'it will be offered automatically next time the same words come up'))
         break
       }
+      if (sub === 'auto') {
+        sys(paint(C.dimmer, 'drafting a skill from this conversation with the local model…'))
+        scheduleRender()
+        const made = await bridge.learner.draftSkill(state.lines, { name: rest2.join(' ').trim() })
+        if (!made) { sys('nothing repeatable to save yet — do the task first, then /skill auto'); break }
+        sys(paint(C.violet, 'skill written: ') + made.name + (made.when ? paint(C.dimmer, '  when: ' + made.when) : ''))
+        sys(paint(C.dimmer, 'it will be offered automatically next time you ask for this'))
+        break
+      }
       if (sub === 'show') {
         const one = skillsLib.read(rest2.join(' '))
         if (!one) { sys('no such skill'); break }
@@ -759,6 +779,61 @@ async function command(raw) {
 
     case 'remind-all': {
       sys('usage: /reminders')
+      break
+    }
+
+    case 'summary': {
+      sys(paint(C.dimmer, 'summarising this session with the local model…'))
+      scheduleRender()
+      const sum = await bridge.session.summarise('default')
+      state.lines = state.lines.filter((l) => !l.transient)
+      if (!sum) { sys('nothing to summarise yet'); break }
+      sys(paint(C.accent, 'session so far:'))
+      for (const line of sum.split('\n')) sys(line)
+      break
+    }
+
+    case 'sessions': {
+      const list = bridge.session.list()
+      if (!list.length) { sys('no session notes yet'); break }
+      for (const s2 of list.slice(0, 8)) {
+        const when = s2.updated ? new Date(s2.updated).toLocaleString().slice(0, 16) : ''
+        sys(paint(C.dimmer, when + ' ') + paint(C.accent, s2.name) + ' — ' + (s2.summary || '').slice(0, 60))
+      }
+      break
+    }
+
+    case 'remember': {
+      if (!arg) { sys('usage: /remember my repos live on D:'); break }
+      const ok = memory.add(arg)
+      sys(ok ? paint(C.violet, 'remembered: ') + arg : 'already knew that, or it looked like a secret')
+      break
+    }
+
+    case 'recall': {
+      if (!arg) {
+        const facts = memory.list()
+        sys(facts.length ? facts.slice(-10).map((f) => '• ' + f).join('\n') : 'nothing learned yet')
+        break
+      }
+      const hits = memory.recall(arg, 6)
+      if (!hits.length) { sys('nothing matches that'); break }
+      for (const h of hits) sys('• ' + h)
+      break
+    }
+
+    case 'models': {
+      const list = await bridge.ollama.models()
+      if (!list.length) { sys('ollama is not reachable on 127.0.0.1:11434'); break }
+      for (const m of list) sys(paint(C.accent, m.name) + paint(C.dimmer, '  ' + (m.params || '') + '  ' + ((m.size || 0) / 1e9).toFixed(1) + ' GB'))
+      sys(paint(C.dimmer, 'local model: ' + bridge.ollama.MODEL))
+      break
+    }
+
+    case 'local': {
+      if (arg === 'on') { bridge.settings.preferLocal = true; sys('local only — answers come from Ollama, no network needed') }
+      else if (arg === 'off') { bridge.settings.preferLocal = false; sys('back to the cloud agent') }
+      else sys('local: ' + (bridge.settings.preferLocal ? 'on' : 'off') + '  (use /local on|off)')
       break
     }
 
@@ -878,6 +953,9 @@ async function main() {
     process.stdout.write('\n')
     return
   }
+
+  /* Warm the local model in the background so summaries are instant later. */
+  bridge.ollama.available().then((ok) => { if (ok) bridge.ollama.warm() }).catch(() => {})
 
   refreshHw()
   pollGpu()

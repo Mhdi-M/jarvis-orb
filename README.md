@@ -70,6 +70,10 @@ so instead of hanging.
 | `/skill save <name>` | write a skill from what you just did |
 | `/skills` · `/skill show|rm <name>` | manage self-written skills |
 | `/profile` | what Jarvis learned about your style |
+| `/summary` · `/sessions` | rolling session summary (local model) and notes on disk |
+| `/remember <fact>` · `/recall [term]` | store and search what it knows about you |
+| `/models` · `/local on\|off` | local Ollama models, answer from them only |
+| `/skill auto [name]` | let the local model write the skill |
 | `/notch` | start the monitoring notch |
 | `/quit` | leave |
 
@@ -101,6 +105,23 @@ While the session runs, the right column tracks:
   context has grown
 - **HARDWARE** — CPU, RAM, GPU temperature, disk, refreshed every 2 s
 - **reminders / memory / uptime**
+
+## Local model (Ollama)
+
+Jarvis keeps a local model warm and uses it for everything that does not need the
+big one — nothing leaves the machine and it costs nothing:
+
+| job | how |
+| --- | --- |
+| session summary | every 6 exchanges the conversation is compressed into a few bullet lines, stored in `data/sessions/` and injected as "session so far" |
+| learning facts | after each answer the local model extracts durable preferences ("User deploys with pnpm…") and writes them to memory |
+| skill drafting | `/skill auto` turns what you just did into numbered steps, saved under `data/skills/` and injected when the same work comes up |
+| offline answers | `/local on` answers from Ollama alone, no network |
+
+Model: `qwen2.5:1.5b` by default (`JARVIS_OLLAMA_MODEL` to change). The first call
+loads it (~19 s); after that a short answer takes 0.2–0.3 s, and the CLI warms it
+at startup. Embeddings are not used: this Ollama server runs without
+`--embeddings`, so recall is keyword + recency scoring.
 
 ## How it talks to Hermes
 

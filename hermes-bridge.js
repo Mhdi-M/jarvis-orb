@@ -20,8 +20,17 @@ const netmode = require('./lib/netmode')
 const profile = require('./lib/profile')
 const monitor = require('./lib/monitor')
 const skills = require('./lib/skills')
+const session = require('./lib/session')
+const learner = require('./lib/learner')
+const ollama = require('./lib/ollama')
 
 const settings = { netMode: 'direct', preferLocal: false, model: '', provider: '' }
+
+/* How many exchanges between rolling summaries, and whether to learn at all. */
+const LEARN_EVERY = Number(process.env.JARVIS_LEARN_EVERY || 1)
+const SUMMARISE_EVERY = Number(process.env.JARVIS_SUMMARISE_EVERY || 6)
+let turnCount = 0
+let pendingLearn = null
 
 const HERMES_EXE =
   process.env.JARVIS_HERMES_EXE ||
@@ -288,7 +297,8 @@ function ask(text, opts = {}) {
     if (settings.preferLocal) return Object.assign(await offlineAnswer(text), learned.length ? { learned } : {})
     /* skills Jarvis wrote for itself, when they match this request */
     const skillCtx = skills.toContext(text)
-    const ctx = [memory.context(text), memory.isEnabled() ? profile.styleHint() : '', memory.isEnabled() ? profile.recentContext() : '', skillCtx, pressureNote()].filter(Boolean).join('\n')
+    const sessionCtx = session.context('default')
+    const ctx = [memory.context(text), memory.isEnabled() ? profile.styleHint() : '', memory.isEnabled() ? profile.recentContext() : '', sessionCtx, skillCtx, pressureNote()].filter(Boolean).join('\n')
     const prompt = ctx ? `[Context from Jarvis, do not mention unless relevant]\n${ctx}\n\n${text}` : text
     let res = await spawnHermes(prompt, opts.onDelta, opts.onMeta)
     if (!res.ok && /chat is paused|was not sent|paused turn/i.test(res.text || '')) {
@@ -301,6 +311,29 @@ function ask(text, opts = {}) {
       res = local.ok ? local : { ...res, text: res.text + '\n(Local fallback also unavailable.)' }
     }
     if (learned.length) res.learned = learned
+
+    if (res.ok && !res.stopped) {
+      turnCount++
+      try {
+        session.append('default', 'you', text)
+        session.append('default', 'jarvis', res.text)
+      } catch {}
+
+      /* Learning runs on the local model, off the critical path. One at a time. */
+      if (turnCount % LEARN_EVERY === 0 && !pendingLearn) {
+        pendingLearn = learner.learnFacts(text, res.text)
+          .then((facts) => {
+            if (facts && facts.length && opts.onLearn) { try { opts.onLearn(facts) } catch {} }
+            return facts
+          })
+          .catch(() => [])
+          .finally(() => { pendingLearn = null })
+      }
+
+      if (turnCount % SUMMARISE_EVERY === 0) {
+        session.summarise('default').catch(() => {})
+      }
+    }
     return res
   }
   const p = chain.then(task, task)
@@ -312,6 +345,10 @@ module.exports = {
   ask,
   cancel,
   settings,
+  session,
+  learner,
+  ollama,
+  whenLearned: () => pendingLearn || Promise.resolve([]),
   resetSession,
   getSessionId: () => sessionId,
   HERMES_EXE,
