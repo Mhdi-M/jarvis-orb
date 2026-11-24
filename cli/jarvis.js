@@ -296,13 +296,79 @@ const BANNER = [
   ' \u255a\u2550\u2550\u2550\u2550\u255d \u255a\u2550\u255d  \u255a\u2550\u255d\u255a\u2550\u255d  \u255a\u2550\u255d  \u255a\u2550\u2550\u2550\u255d  \u255a\u2550\u255d\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d',
 ]
 
-/* the input line scrolls sideways so the cursor is always on screen and lands on
- * the right column even when the text has wide characters */
-function inputView(text, pos, avail) {
-  const width = (v) => strWidth(v)
-  let start = 0
-  while (start < text.length && (width(text.slice(start)) > avail - 1 || width(text.slice(start, pos)) > avail - 2)) start++
-  return { text: text.slice(start), off: Math.max(0, pos - start) }
+/* The writing box grows with the prompt: text wraps into up to MAX_INPUT_ROWS
+ * rows and the view scrolls only when it needs to, so the cursor is always
+ * visible and never lands on the wrong cell (wide characters count as two). */
+const MAX_INPUT_ROWS = 5
+const cellOf = (ch) => {
+  const cp = ch.codePointAt(0)
+  if (cp === 0x200d || cp === 0xfe0f || (cp >= 0x0300 && cp <= 0x036f)) return 0
+  const wide = (cp >= 0x1100 && cp <= 0x115f) || cp === 0x2329 || cp === 0x232a ||
+    (cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f) ||
+    (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xfe10 && cp <= 0xfe19) || (cp >= 0xfe30 && cp <= 0xfe6f) ||
+    (cp >= 0xff00 && cp <= 0xff60) || (cp >= 0xffe0 && cp <= 0xffe6) ||
+    (cp >= 0x1f300 && cp <= 0x1f64f) || (cp >= 0x1f900 && cp <= 0x1f9ff) ||
+    (cp >= 0x1f000 && cp <= 0x1f02f) || (cp >= 0x20000 && cp <= 0x3fffd)
+  return wide ? 2 : 1
+}
+
+function wrapInput(text, pos, width, maxRows) {
+  const s2 = String(text)
+  const rows = []
+  let i2 = 0
+  // word wrap: fill a row with whole words, hard-break only a word too long to fit
+  while (i2 < s2.length) {
+    const start = i2
+    let line = ''
+    let w = 0
+    while (i2 < s2.length) {
+      const m = s2.slice(i2).match(/^(\s*\S+|\s+)/)
+      const tok = m ? m[0] : s2[i2]
+      const tw = strWidth(tok)
+      if (line && w + tw > width) break
+      if (!line && tw > width) {
+        let take = ''
+        let tw2 = 0
+        for (const ch of tok) {
+          const cw = cellOf(ch)
+          if (tw2 + cw > width) break
+          take += ch; tw2 += cw
+        }
+        line += take; w += tw2; i2 += take.length
+        break
+      }
+      line += tok; w += tw; i2 += tok.length
+      if (w >= width) break
+    }
+    if (i2 === start) i2 += 1          // never spin on a zero-width token
+    rows.push({ text: line, start })
+  }
+  if (!rows.length) rows.push({ text: '', start: 0 })
+
+  let cursorRow = rows.length - 1
+  let cursorCol = strWidth(rows[cursorRow].text)
+  for (let k = 0; k < rows.length; k++) {
+    const until = k + 1 < rows.length ? rows[k + 1].start : s2.length
+    if (pos >= rows[k].start && pos < until) {
+      cursorRow = k
+      cursorCol = strWidth(s2.slice(rows[k].start, pos))
+      break
+    }
+    if (k === rows.length - 1 && pos >= rows[k].start) {
+      cursorRow = k
+      cursorCol = strWidth(s2.slice(rows[k].start, pos))
+    }
+  }
+
+  const shown = Math.min(rows.length, Math.max(1, maxRows))
+  const startRow = Math.max(0, Math.min(cursorRow - shown + 1, rows.length - shown))
+  return {
+    rows: rows.slice(startRow, startRow + shown).map((r2) => r2.text),
+    cursorRow: cursorRow - startRow,
+    cursorCol,
+    count: shown,
+  }
 }
 
 function render() {
@@ -313,8 +379,12 @@ function render() {
   const sideW = cols >= 92 ? 34 : 0
   const chatW = cols - sideW - 3
   const animRows = rows >= 20 ? 3 : 0
-  const bodyRows = rows - animRows - 4       // animation + rule + box + input + spare
-  if (bodyRows < 5) return
+  const promptW = 1 + strWidth('\u203a ')
+  const inputAvail = Math.max(8, cols - 1 - promptW)
+  const iv = wrapInput(state.input, state.pos, inputAvail, rows < 22 ? 3 : MAX_INPUT_ROWS)
+  const inputRows = iv.count
+  const bodyRows = rows - animRows - inputRows - 3    // anim + body + rule + input + box + spare
+  if (bodyRows < 4) return
 
   // ---- transcript rows (schema is role-tagged so questions cannot be confused
   //      with answers: amber gutter for you, blue labelled gutter for Jarvis)
@@ -329,20 +399,14 @@ function render() {
     // name, then a vertical rule, then the text: 'you    │ ...' / 'JARVIS │ ...'
     const nameHead = (name, color) => paint(color, C.bold + pad(name, 7)) + paint(C.edge, '\u2502 ')
 
-    // the procedure of one turn lives in a soft, rounded, full-width box
+    // the procedure is plain text: no box, no background, just dim small-looking
+    // lines tucked under the question
     const pushThinkBox = (run) => {
-      const boxW = Math.max(12, chatW - 1)
-      const inner = Math.max(8, boxW - 4)
-      const top = '\u256d' + '\u2500'.repeat(Math.max(0, boxW - 2)) + '\u256e'
-      const bot = '\u2570' + '\u2500'.repeat(Math.max(0, boxW - 2)) + '\u256f'
-      push('', C.panelSoft + paint(C.edgeSoft, pad(top, chatW)) + C.reset, top, -2)
-      for (const line of run) {
-        for (const piece of wrap(line, inner)) {
-          const body = '\u2502 ' + pad(piece, inner) + ' \u2502'
-          push('', C.panelSoft + paint(C.dimmer, pad(body, chatW)) + C.reset, body, -2)
+      for (const item of run) {
+        for (const piece of wrap(item.text, Math.max(8, chatW - 6))) {
+          push('    ', paint(C.dimmer, piece), '    ' + piece, item.li)
         }
       }
-      push('', C.panelSoft + paint(C.edgeSoft, pad(bot, chatW)) + C.reset, bot, -2)
     }
 
     let prevRole = null
@@ -352,8 +416,9 @@ function render() {
 
       if (l.role === 'think') {
         const run = []
-        while (li < state.lines.length && state.lines[li].role === 'think') { run.push(state.lines[li].text); li++ }
-        li--
+        let ri = li
+        while (ri < state.lines.length && state.lines[ri].role === 'think') { run.push({ text: state.lines[ri].text, li: ri }); ri++ }
+        li = ri - 1
         pushThinkBox(run)
         prevRole = 'think'
         continue
@@ -495,29 +560,33 @@ function render() {
 
 
 
-  const inputStart = 2 + strWidth(inputLabel)   // ' ' + label, 1-based
-  const availInput = Math.max(8, cols - 1 - inputStart - 1)
-  const view = inputView(state.input, state.pos, availInput)
-  const inputLine = state.selAll && view.text
-    ? pad(' ' + inputLabel + '\x1b[7m' + view.text + '\x1b[0m', cols - 1)
-    : pad(' ' + inputLabel + paint(C.bright, view.text), cols - 1)
-  out.push(C.panelAlt + inputLine + ' '.repeat(Math.max(0, cols - 1 - strWidth(inputLine))) + C.reset + '\r\n')
-  screen.push((' ' + inputLabel + view.text).replace(/\x1b\[[0-9;]*m/g, ''))
-  rowSrc.push(-2)
+  const inputStart = 1 + promptW          // 1-based column where the text begins
+  for (let k = 0; k < iv.rows.length; k++) {
+    const body = iv.rows[k] || ''
+    const lead = k === 0 ? ' ' + inputLabel : ' '.repeat(promptW)
+    const painted = (state.selAll && body)
+      ? lead + '\x1b[7m' + body + '\x1b[0m'
+      : lead + paint(C.bright, body)
+    const line = pad(painted, cols - 1)
+    out.push(C.panelAlt + line + ' '.repeat(Math.max(0, cols - 1 - strWidth(line))) + C.reset + '\r\n')
+    screen.push((lead + body).replace(/\x1b\[[0-9;]*m/g, ''))
+    rowSrc.push(-2)
+  }
 
   // detail box sits under the writing box, as the last row of the frame
-  out.push(pad(boxLeft, chatW) + (sideW ? paint(C.edge, '\u2502') + pad(side[animRows + bodyRows + 2] || '', sideW) : ''))
+  out.push(pad(boxLeft, chatW) + (sideW ? paint(C.edge, '\u2502') + pad(side[animRows + bodyRows + 1 + inputRows] || '', sideW) : ''))
   screen.push(pad(boxLeft.replace(/\x1b\[[0-9;]*m/g, ''), chatW) + (sideW ? '\u2502' : ''))
   rowSrc.push(-2)
   state.screen = screen
   state.rowSrc = rowSrc
   state.chatW = chatW
 
-  const inputRow = animRows + bodyRows + 2   // rule, then the writing box; the detail box is below it
+  const cursorRowAbs = animRows + bodyRows + 1 + iv.cursorRow + 1   // 1-based row of the caret
   const hintPlain = hint.replace(/\x1b\[[0-9;]*m/g, '')
   const hintCol = cols - strWidth(hintPlain) - 1
-  if (hintCol > inputStart + strWidth(view.text) + 2) {
-    out.push('\x1b[' + inputRow + ';' + hintCol + 'H' + hint)
+  const lastInputRow = animRows + bodyRows + 1 + inputRows
+  if (hintCol > inputStart + strWidth(iv.rows[iv.rows.length - 1] || '') + 2) {
+    out.push('\x1b[' + lastInputRow + ';' + hintCol + 'H' + hint)
   }
 
   // ---- selection painted on top of the frame
@@ -537,8 +606,8 @@ function render() {
   }
 
   // cursor lands after the visible prefix, so wide characters do not shift it
-  const cursorCol = inputStart + strWidth(view.text.slice(0, view.off))
-  out.push('\x1b[' + inputRow + ';' + Math.max(1, Math.min(cols - 1, cursorCol)) + 'H')
+  const cursorCol = inputStart + iv.cursorCol
+  out.push('\x1b[' + cursorRowAbs + ';' + Math.max(1, Math.min(cols - 1, cursorCol)) + 'H')
   out.push('\x1b[?25h')
   process.stdout.write(out.join(''))
 }
@@ -1445,6 +1514,10 @@ async function main() {
     if (scrollAt > -1) state.scroll = Number(process.argv[scrollAt + 1] || 10) || 10
     if (process.argv.includes('--sel')) state.sel = { r1: 2, c1: 1, r2: 3, c2: 24 }
     if (process.argv.includes('--selall')) state.selAll = true
+    if (process.argv.includes('--long')) {
+      state.input = 'summarise everything you have seen in this session so far, then list the exact commands you ran and how long each of them took, and finally tell me which of them changed something on the machine'
+      state.pos = state.input.length
+    }
     if (process.argv.includes('--busy')) { state.busy = true; state.busySince = Date.now() - 4200 }
     if (!process.argv.includes('--empty')) {
       state.lastAnswer = { ms: 10100, tokIn: 28127, tokOut: 82, modelMs: 7400, at: Date.now() }
