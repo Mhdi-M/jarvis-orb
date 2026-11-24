@@ -21,6 +21,10 @@ const bridge = require(path.join(ROOT, 'hermes-bridge'))
 const { sampler } = require(path.join(ROOT, 'lib', 'cpu'))
 const memory = require(path.join(ROOT, 'lib', 'memory'))
 const monitorLib = require(path.join(ROOT, 'lib', 'monitor'))
+const messagesLib = require(path.join(ROOT, 'lib', 'messages'))
+const chromeLib = require(path.join(ROOT, 'lib', 'chrome'))
+const skillsLib = require(path.join(ROOT, 'lib', 'skills'))
+const profileLib = require(path.join(ROOT, 'lib', 'profile'))
 const remindersLib = { parseReminder: null, parseNote: null }
 const intentLib = { parseIntent: null }
 
@@ -82,6 +86,8 @@ const state = {
   queued: 0,
   status: 'ready',
   lastMs: 0,
+  lastSearch: [],     // last /find or /messages result, for /summarize
+  lastSource: '',
 }
 
 /* --------------------------------------------------------------- messages */
@@ -434,6 +440,14 @@ const HELP = [
   ['/notes [clear]', 'list or clear notes'],
   ['/memory', 'what Jarvis remembers about you'],
   ['/forget <text>', 'drop matching facts'],
+  ['/tabs · /tab <n> · /chrome', 'list, read a Chrome tab, launch CDP Chrome'],
+  ['/messages [n]', 'recent notifications from every app on the PC'],
+  ['/msg <app>', 'read an open WhatsApp/Telegram/X/… tab'],
+  ['/find <term>', 'search notification history'],
+  ['/summarize [term]', 'summarise the last search or the recent messages'],
+  ['/skill save <name>', 'write a skill from what we just did'],
+  ['/skills · /skill show|rm <name>', 'manage self-written skills'],
+  ['/profile', 'what Jarvis learned about your style'],
   ['/notch', 'start the monitoring notch'],
   ['/quit', 'leave'],
 ]
@@ -592,6 +606,159 @@ async function command(raw) {
       if (!arg) { sys('usage: /forget editor'); break }
       const n = memory.forget(arg)
       sys(`${n} fact(s) forgotten`)
+      break
+    }
+
+    case 'tabs': {
+      try {
+        const list = await chromeLib.tabs()
+        if (!list.length) { sys('Chrome is open but has no tabs.'); break }
+        list.slice(0, 15).forEach((t, i) => {
+          const tag = t.appLabel ? paint(C.green, '[' + t.appLabel + '] ') : ''
+          sys(`${String(i + 1).padStart(2)}. ${tag}${(t.title || '(no title)').slice(0, 60)}`)
+          sys(`    ${paint(C.dimmer, t.url.slice(0, 70))}`)
+        })
+      } catch (e) {
+        sys('✗ Chrome not reachable on port 9222 — run /chrome')
+      }
+      break
+    }
+
+    case 'chrome': {
+      const r = chromeLib.launch()
+      sys(r.ok ? 'Chrome starting with the debug port (127.0.0.1:9222)…' : '✗ ' + r.error)
+      break
+    }
+
+    case 'tab': {
+      if (!arg) { sys('usage: /tab 2'); break }
+      try {
+        const list = await chromeLib.tabs()
+        const t = list[parseInt(arg, 10) - 1]
+        if (!t) { sys('no tab ' + arg); break }
+        const r = await chromeLib.readTab(t.ws, { maxChars: 4000 })
+        sys(`${t.title} — ${t.url}`)
+        if (!r.ok) { sys('✗ ' + r.error); break }
+        for (const line of chromeLib.messageLines(r.text, { max: 30 })) addLine('jarvis', line)
+      } catch { sys('✗ Chrome not reachable — run /chrome') }
+      break
+    }
+
+    case 'msg': case 'messages-app': {
+      const kind = (arg || '').toLowerCase() || 'whatsapp'
+      const r = await chromeLib.readApp(kind, { maxChars: 20000 })
+      if (!r.ok) { sys('✗ ' + r.error); break }
+      const lines = chromeLib.messageLines(r.text, { max: 25 })
+      state.lastSearch = lines.map((l) => ({ app: kind, title: l, body: '', at: Date.now() }))
+      state.lastSource = kind + ' (live tab)'
+      sys(`${kind} — ${lines.length} lines from the open tab`)
+      for (const l of lines) addLine('jarvis', l)
+      break
+    }
+
+    case 'messages': {
+      const n = parseInt(arg, 10) || 15
+      const r = messagesLib.readNotifications({ limit: 200 })
+      if (!r.ok) { sys('✗ ' + r.error); break }
+      state.lastSearch = r.items
+      state.lastSource = 'notification history'
+      sys(`${r.items.length} notifications on this machine · newest first`)
+      for (const it of r.items.slice(0, n)) {
+        const when = it.at ? new Date(it.at).toLocaleTimeString().slice(0, 5) : '--:--'
+        sys(`${when} ${paint(C.accent, '[' + it.app + ']')} ${it.title}${it.body ? ' — ' + it.body.slice(0, 70) : ''}`)
+      }
+      break
+    }
+
+    case 'find': {
+      if (!arg) { sys('usage: /find invoice'); break }
+      const r = messagesLib.readNotifications({ limit: 400 })
+      if (!r.ok) { sys('✗ ' + r.error); break }
+      const hits = messagesLib.search(r.items, arg)
+      state.lastSearch = hits
+      state.lastSource = `search "${arg}" in notifications`
+      if (!hits.length) { sys(`nothing matches "${arg}"`); break }
+      sys(`${hits.length} matches for "${arg}"`)
+      for (const it of hits.slice(0, 12)) {
+        const when = it.at ? new Date(it.at).toLocaleString().slice(0, 16) : ''
+        sys(`${paint(C.dimmer, when)} ${paint(C.accent, '[' + it.app + ']')} ${it.title.slice(0, 40)} — ${it.body.slice(0, 80)}`)
+      }
+      break
+    }
+
+    case 'summarize': {
+      let items = state.lastSearch
+      let source = state.lastSource
+      if (!items || !items.length) {
+        const r = messagesLib.readNotifications({ limit: 200 })
+        if (!r.ok) { sys('✗ ' + r.error); break }
+        items = arg ? messagesLib.search(r.items, arg) : r.items
+        source = arg ? `search "${arg}"` : 'notification history'
+      }
+      if (!items.length) { sys('nothing to summarise — run /messages or /find first'); break }
+      const block = items.slice(0, 40).map((it) => `[${it.app}] ${it.title}${it.body ? ': ' + it.body.slice(0, 200) : ''}`).join('\n')
+      return askAgent(
+        `Summarise these ${items.length} messages from ${source}. Group by sender/app, call out anything that needs a reply or a decision, and keep it under 120 words. Do not invent anything.\n\n${block}`
+      )
+    }
+
+    case 'msgapps': {
+      const list = await chromeLib.tabs().catch(() => [])
+      const found = [...new Set(list.filter((t) => t.app).map((t) => t.app))]
+      sys(found.length ? 'open apps: ' + found.join(', ') : 'no message apps open in Chrome — run /chrome then open one')
+      break
+    }
+
+    case 'skill': {
+      const [sub, ...rest2] = arg.split(/\s+/)
+      if (!sub || sub === 'list') {
+        const all = skillsLib.list()
+        if (!all.length) { sys('no skills yet — /skill save <name>  (writes what we just did)'); break }
+        for (const sk of all) sys(paint(C.accent, sk.name) + (sk.when ? paint(C.dimmer, '  when: ' + sk.when) : ''))
+        break
+      }
+      if (sub === 'save') {
+        const name = rest2.join(' ').trim() || 'conversation-' + new Date().toISOString().slice(0, 10)
+        const body = skillsLib.fromTranscript(state.lines, { max: 30 })
+        const when = state.history.slice(-5).join(' ')
+        const r = skillsLib.save({ name, when, body })
+        sys(`skill saved: ${paint(C.accent, name)} → ${path.relative(ROOT, r.file)}`)
+        sys(paint(C.dimmer, 'it will be offered automatically next time the same words come up'))
+        break
+      }
+      if (sub === 'show') {
+        const one = skillsLib.read(rest2.join(' '))
+        if (!one) { sys('no such skill'); break }
+        sys(paint(C.accent, one.name) + (one.when ? paint(C.dimmer, '  when: ' + one.when) : ''))
+        for (const line of one.body.split('\n')) sys(line)
+        break
+      }
+      if (sub === 'rm' || sub === 'remove' || sub === 'delete') {
+        const ok = skillsLib.remove(rest2.join(' '))
+        sys(ok ? 'skill removed' : 'no such skill')
+        break
+      }
+      sys('usage: /skill save <name> · /skill show <name> · /skill rm <name> · /skill list')
+      break
+    }
+
+    case 'skills': {
+      const all = skillsLib.list()
+      if (!all.length) { sys('no skills yet — /skill save <name>'); break }
+      for (const sk of all) sys(paint(C.accent, sk.name) + (sk.when ? paint(C.dimmer, '  when: ' + sk.when.slice(0, 60)) : ''))
+      break
+    }
+
+    case 'profile': {
+      try {
+        const hint = profileLib.styleHint ? profileLib.styleHint() : ''
+        sys(hint || 'nothing learned about your style yet — keep talking')
+      } catch { sys('profile unavailable') }
+      break
+    }
+
+    case 'remind-all': {
+      sys('usage: /reminders')
       break
     }
 

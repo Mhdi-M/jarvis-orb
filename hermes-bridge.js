@@ -19,6 +19,7 @@ const localEngine = require('./lib/local-engine')
 const netmode = require('./lib/netmode')
 const profile = require('./lib/profile')
 const monitor = require('./lib/monitor')
+const skills = require('./lib/skills')
 
 const settings = { netMode: 'direct', preferLocal: false, model: '', provider: '' }
 
@@ -285,7 +286,9 @@ function ask(text, opts = {}) {
     const learned = memory.learnFrom(text)
     if (memory.isEnabled()) profile.record(text)
     if (settings.preferLocal) return Object.assign(await offlineAnswer(text), learned.length ? { learned } : {})
-    const ctx = [memory.context(text), memory.isEnabled() ? profile.styleHint() : '', memory.isEnabled() ? profile.recentContext() : '', pressureNote()].filter(Boolean).join('\n')
+    /* skills Jarvis wrote for itself, when they match this request */
+    const skillCtx = skills.toContext(text)
+    const ctx = [memory.context(text), memory.isEnabled() ? profile.styleHint() : '', memory.isEnabled() ? profile.recentContext() : '', skillCtx, pressureNote()].filter(Boolean).join('\n')
     const prompt = ctx ? `[Context from Jarvis, do not mention unless relevant]\n${ctx}\n\n${text}` : text
     let res = await spawnHermes(prompt, opts.onDelta, opts.onMeta)
     if (!res.ok && /chat is paused|was not sent|paused turn/i.test(res.text || '')) {

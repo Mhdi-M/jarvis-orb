@@ -62,6 +62,14 @@ so instead of hanging.
 | `/reminders [clear]` | list or clear |
 | `/note <text>` / `/notes [clear]` | quick notes |
 | `/memory` · `/forget <text>` | what it knows about you |
+| `/tabs` · `/tab <n>` · `/chrome` | list Chrome tabs, read one, launch CDP Chrome |
+| `/messages [n]` | recent notifications from every app on the PC |
+| `/msg <app>` | read an open WhatsApp / Telegram / X / LinkedIn tab |
+| `/find <term>` | deep search the notification history |
+| `/summarize [term]` | summarise the last search or the recent messages |
+| `/skill save <name>` | write a skill from what you just did |
+| `/skills` · `/skill show|rm <name>` | manage self-written skills |
+| `/profile` | what Jarvis learned about your style |
 | `/notch` | start the monitoring notch |
 | `/quit` | leave |
 
