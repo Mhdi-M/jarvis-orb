@@ -683,7 +683,7 @@ async function main() {
   const sid = bridge.getSessionId && bridge.getSessionId()
   state.session = sid ? String(sid).slice(0, 12) : 'new'
 
-  const oneShot = process.argv.slice(2).join(' ').trim()
+  const oneShot = process.argv.slice(2).join(' ').trim().replace(/^["']+|["']+$/g, '')
   INTERACTIVE = !oneShot
 
   const frameOnly = process.argv.includes('--frame')
