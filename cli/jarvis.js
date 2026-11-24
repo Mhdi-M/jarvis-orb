@@ -37,19 +37,20 @@ const C = {
   reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m',
   accent: '\x1b[38;2;86;138;214m',
   bright: '\x1b[38;2;236;241;247m',
-  // silver on black with deep blue structure: three tones + one hue, no more
-  steel: '\x1b[38;2;168;180;196m',      // secondary text
-  dimmer: '\x1b[38;2;104;118;138m',     // meta, labels, procedure
-  green: '\x1b[38;2;140;200;170m',
-  amber: '\x1b[38;2;214;196;140m',
-  red: '\x1b[38;2;216;132;140m',
-  violet: '\x1b[38;2;150;160;210m',
-  edge: '\x1b[38;2;42;74;124m',         // deep blue borders
-  blue: '\x1b[38;2;86;138;214m',        // deep blue accents
-  panel: '\x1b[48;2;14;18;25m',         // near-black panel
-  panelAlt: '\x1b[48;2;21;27;37m',      // slightly lifted panel
-  panelSoft: '\x1b[48;2;28;34;44m',     // ~20% lifted: the translucent look
-  edgeSoft: '\x1b[38;2;58;78;104m',     // rounded corners of soft boxes
+  steel: '\x1b[38;2;139;147;155m',      // secondary text
+  dimmer: '\x1b[38;2;106;111;117m',     // muted text, labels
+  green: '\x1b[38;2;126;182;152m',
+  amber: '\x1b[38;2;190;170;120m',
+  red: '\x1b[38;2;196;120;126m',
+  violet: '\x1b[38;2;140;150;190m',
+  ghost: '\x1b[38;2;60;64;70m',         // the dimmest tone (borders, meta)
+  edge: '\x1b[38;2;47;51;56m',          // hairlines, dividers
+  blue: '\x1b[38;2;59;104;199m',        // accent
+  blueDeep: '\x1b[38;2;40;66;121m',     // deep accent
+  panel: '\x1b[48;2;15;22;33m',         // card tone from the app
+  panelAlt: '\x1b[48;2;18;24;34m',
+  panelSoft: '\x1b[48;2;21;28;38m',
+  edgeSoft: '\x1b[38;2;47;51;56m',
 }
 const bar1 = (s2) => C.panel + s2 + C.reset
 const paint = (c, s) => c + s + C.reset
@@ -130,7 +131,8 @@ const state = {
 /* --------------------------------------------------------------- messages */
 function addLine(role, text) {
   const chunks = String(text ?? '').split('\n')
-  for (const chunk of chunks) state.lines.push({ role, text: chunk })
+  const at = Date.now()
+  for (const chunk of chunks) state.lines.push({ role, text: chunk, at })
   if (state.lines.length > 800) state.lines.splice(0, state.lines.length - 800)
 }
 const sys = (t) => addLine('sys', t)
@@ -396,8 +398,6 @@ function render() {
     push('', '', '', -1)
     push('', paint(C.dimmer, '  type a question, or ') + paint(C.accent, '/help') + paint(C.dimmer, '   \u00b7   open notepad \u00b7 read example.com'), '', -1)
   } else {
-    // name, then a vertical rule, then the text: 'you    │ ...' / 'JARVIS │ ...'
-    const nameHead = (name, color) => paint(color, C.bold + pad(name, 7)) + paint(C.edge, '\u2502 ')
 
     // the procedure is plain text: no box, no background, just dim small-looking
     // lines tucked under the question
@@ -424,28 +424,29 @@ function render() {
         continue
       }
 
-      let head = '      '
-      let color = C.bright
-      let wide = '      '
-      if (l.role === 'you') {
-        head = nameHead('you', C.steel)
-        wide = ' '.repeat(9); color = C.steel
-      } else if (l.role === 'jarvis') {
-        head = nameHead('JARVIS', C.dimmer)
-        wide = ' '.repeat(9); color = C.bright
-      } else if (l.role === 'sys') {
-        head = ' '.repeat(7) + paint(C.edge, '\u00b7 ') + ' '; wide = ' '.repeat(9); color = C.dimmer
+      // chat style: a small header line per message, then the text underneath
+      if (l.role === 'you' || l.role === 'jarvis') {
+        if (prevRole && prevRole !== 'you' && prevRole !== 'jarvis') push('', '', '', -3)
+        if (prevRole === 'jarvis' && l.role === 'you') push('', '', '', -3)
+        const isYou = l.role === 'you'
+        const label = isYou
+          ? paint(C.dimmer, C.bold + 'you')
+          : paint(C.accent, C.bold + 'JARVIS')
+        const when = new Date(l.at || Date.now()).toTimeString().slice(0, 5)
+        const meta = paint(C.ghost, '  ' + when)
+        push('', label + meta, (isYou ? 'you' : 'JARVIS'), li)
       }
-      if (l.role === 'you' && prevRole === 'jarvis') push('', '', '', -3)
-      prevRole = l.role
-      const headPlain = head.replace(/\x1b\[[0-9;]*m/g, '')
-      const avail = Math.max(8, chatW - strWidth(headPlain))
+      const indent = (l.role === 'you' || l.role === 'jarvis') ? '  ' : '    '
+      const color = l.role === 'you' ? C.steel
+        : l.role === 'jarvis' ? C.bright
+        : C.dimmer
+      const prefix = l.role === 'sys' ? '\u00b7 ' : ''
+      const avail = Math.max(8, chatW - strWidth(indent) - strWidth(prefix))
       const wrapped = wrap(l.text, avail)
-      for (let w = 0; w < wrapped.length; w++) {
-        const h = w === 0 ? head : wide
-        const hp = w === 0 ? headPlain : ' '.repeat(strWidth(headPlain))
-        push(h, paint(color, wrapped[w]), hp + wrapped[w], li)
+      for (const piece of wrapped) {
+        push(indent + prefix, paint(color, piece), indent + prefix + piece, li)
       }
+      prevRole = l.role
     }
   }
 
