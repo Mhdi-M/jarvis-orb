@@ -165,6 +165,49 @@ function diskFree() {
   return { free: 0, total: 0 }
 }
 
+/* ------------------------------------------------------- specialist agents */
+/* The manager (this model) cannot see. Vision is delegated to a specialist that
+ * runs the same binary with a vision model and only the vision toolset, which is
+ * far cheaper than letting the manager improvise screenshots and three vision
+ * calls (measured: 30s vs 219s / 204k tokens). */
+function visionSpecialist() {
+  try {
+    const cfgPath = path.join(process.env.LOCALAPPDATA || os.homedir(), 'hermes', 'config.yaml')
+    const y = fs.readFileSync(cfgPath, 'utf8')
+    const m = y.match(/auxiliary:\s*\n\s*vision:\s*\n\s*provider:\s*([\w.-]+)\s*\n\s*model:\s*([\w.-]+)/)
+    if (m) return { provider: m[1], model: m[2] }
+  } catch {}
+  return { provider: 'gemini', model: 'gemini-3.6-flash' }
+}
+
+function captureScreen(file) {
+  const ps = 'Add-Type -AssemblyName System.Windows.Forms,System.Drawing; ' +
+    '$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; ' +
+    '$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; ' +
+    '$g=[System.Drawing.Graphics]::FromImage($bmp); ' +
+    '$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); ' +
+    "$bmp.Save('" + file + "'); $g.Dispose(); $bmp.Dispose()"
+  return new Promise((resolve) => {
+    execFile('powershell', ['-NoProfile', '-Command', ps], { windowsHide: true, timeout: 20000 }, () => resolve(file))
+  })
+}
+
+function askVision(file, question) {
+  const sp = visionSpecialist()
+  const prompt = 'Call vision_analyze exactly once on this image path: ' + file +
+    ' - then answer in two short sentences: ' + question
+  return new Promise((resolve) => {
+    execFile(bridge.HERMES_EXE,
+      ['-z', prompt, '-m', sp.model, '--provider', sp.provider, '-t', 'vision'],
+      { windowsHide: true, timeout: 180000, maxBuffer: 4 << 20 },
+      (err, stdout) => {
+        const out = String(stdout || '').trim()
+        if (out) return resolve(out)
+        resolve(err ? '\u2717 vision specialist failed: ' + err.message : '\u2717 no answer')
+      })
+  })
+}
+
 /* ---------------------------------------------------------------- hardware */
 /* state.hw: cpu, ram, gpuTemp, gpuName, gpuUtil, cpuTemp, diskTemp,
  * diskFree, diskTotal */
@@ -845,6 +888,7 @@ function fetchPage(url) {
 /* ---------------------------------------------------------------- commands */
 const HELP = [
   ['/help', 'this list'],
+  ['/look [question]', 'screenshot the screen and ask the vision specialist'],
   ['/think [on|off]', 'show or hide the procedure under each question'],
   ['/timing [on|off]', 'show or hide the +0.0s timings on those lines'],
   ['/model [name]', 'show or set the model (used for the next new session)'],
@@ -1279,6 +1323,19 @@ async function command(raw) {
       else if (arg === 'off') state.showTiming = false
       else state.showTiming = !state.showTiming
       sys('timing ' + (state.showTiming ? 'ON' : 'OFF'))
+      break
+    }
+
+    case 'look': {
+      const shot = path.join(os.tmpdir(), 'jarvis-eye.png')
+      sys(paint(C.dimmer, 'capturing the screen...'))
+      scheduleRender()
+      await captureScreen(shot)
+      sys(paint(C.dimmer, 'eye: asking the vision specialist (' + visionSpecialist().model + ')...'))
+      scheduleRender()
+      const answer = await askVision(shot, arg || 'name the app that is open and anything notable on screen')
+      addLine('jarvis', answer)
+      sys(paint(C.dimmer, 'image ' + shot))
       break
     }
 
