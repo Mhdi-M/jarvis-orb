@@ -130,24 +130,93 @@ function diskFree() {
 }
 
 /* ---------------------------------------------------------------- hardware */
+/* state.hw: cpu, ram, gpuTemp, gpuName, gpuUtil, cpuTemp, diskTemp,
+ * diskFree, diskTotal */
+
+// --- temp parsing inlined (from lib/temps.mjs) ---
+function kelvinTenthsToC(raw) {
+  const n = parseFloat(String(raw == null ? '' : raw).replace(',', '.'))
+  if (!Number.isFinite(n) || n <= 0) return null
+  const c = n / 10 - 273.15
+  return (c < -40 || c > 150) ? null : Math.round(c * 10) / 10
+}
+function parseNvidiaSmi(text) {
+  const line = String(text || '').split('\n').map(l => l.trim()).filter(Boolean)[0]
+  if (!line) return null
+  const parts = line.split(',').map(p => p.trim())
+  const temp = parseFloat(parts[0])
+  if (!Number.isFinite(temp) || temp <= 0 || temp > 130) return null
+  const name = parts[1] && parts[1] !== '[N/A]' ? parts[1] : ''
+  const util = parseFloat(parts[2])
+  return { temp, name, util: (util == null || util < 0) ? null : util }
+}
+function parseThermalZone(text) {
+  const m = String(text || '').match(/CurrentTemperature\s*:?\s*(-?\d+)/i)
+  return m ? kelvinTenthsToC(m[1]) : null
+}
+function parseStorageTemp(text) {
+  const nums = String(text || '').match(/-?\d+/g) || []
+  for (const raw of nums) {
+    const v = parseFloat(raw)
+    if (v == null) continue
+    if (v > 0 && v < 110) return v
+  }
+  return null
+}
+
 const cpuSample = sampler()
-let gpuTemp = null
+let hwCache = { gpuTemp: null, gpuName: '', gpuUtil: null, cpuTemp: null, diskTemp: null }
+
 function pollGpu() {
-  execFile('nvidia-smi', ['--query-gpu=temperature.gpu', '--format=csv,noheader,nounits'],
+  execFile('nvidia-smi',
+    ['--query-gpu=temperature.gpu,name,utilization.gpu', '--format=csv,noheader,nounits'],
     { windowsHide: true, timeout: 6000 }, (err, out) => {
       if (err || !out) return
-      const v = parseFloat(String(out).trim().split('\n')[0])
-      if (Number.isFinite(v)) gpuTemp = v
+      const parsed = parseNvidiaSmi(out)
+      if (parsed) { hwCache.gpuTemp = parsed.temp; hwCache.gpuName = parsed.name; hwCache.gpuUtil = parsed.util }
     })
 }
+
+function pollCpuTemp() {
+  execFile('powershell', ['-NoProfile', '-Command',
+    'Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty CurrentTemperature'],
+    { windowsHide: true, timeout: 5000 }, (err, out) => {
+      if (err || !out) return
+      const v = parseThermalZone(out)
+      if (v != null) hwCache.cpuTemp = v
+    })
+}
+
+function pollDiskTemp() {
+  execFile('powershell', ['-NoProfile', '-Command',
+    'Get-PhysicalDisk | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Temperature'],
+    { windowsHide: true, timeout: 5000 }, (err, out) => {
+      if (err || !out) return
+      const v = parseStorageTemp(out)
+      if (v != null) hwCache.diskTemp = v
+    })
+}
+
 function refreshHw() {
   const total = os.totalmem()
   const d = diskFree()
   state.hw.cpu = cpuSample()
   state.hw.ram = total ? 100 * (1 - os.freemem() / total) : 0
-  state.hw.gpu = gpuTemp
+  state.hw.gpuTemp = hwCache.gpuTemp
+  state.hw.gpuName = hwCache.gpuName
+  state.hw.gpuUtil = hwCache.gpuUtil
+  state.hw.cpuTemp = hwCache.cpuTemp
+  state.hw.diskTemp = hwCache.diskTemp
   state.hw.diskFree = d.free
   state.hw.diskTotal = d.total
+}
+
+let tempPollTimer = null
+function startTempPolling() {
+  if (tempPollTimer) return
+  pollGpu(); pollCpuTemp(); pollDiskTemp()
+  tempPollTimer = setInterval(() => { pollGpu(); pollCpuTemp(); pollDiskTemp() }, 10000)
+  setTimeout(() => { startTempPolling() }, 30000)
 }
 
 /* ---------------------------------------------------------------- rendering */
@@ -221,9 +290,15 @@ function render() {
   kv('context', state.tokens.context ? (state.tokens.context / 1000).toFixed(1) + 'k' : '—')
   side.push(rule)
   side.push(' ' + paint(C.dimmer, 'HARDWARE'))
-  side.push(' ' + paint(C.dimmer, 'CPU ') + bar(state.hw.cpu, 12) + ' ' + paint(C.steel, Math.round(state.hw.cpu) + '%'))
-  side.push(' ' + paint(C.dimmer, 'RAM ') + bar(state.hw.ram, 12) + ' ' + paint(C.steel, Math.round(state.hw.ram) + '%'))
-  side.push(' ' + paint(C.dimmer, 'GPU ') + paint(C.steel, state.hw.gpu == null ? 'n/a' : Math.round(state.hw.gpu) + '°C'))
+  side.push(' ' + paint(C.dimmer, 'CPU ') + bar(state.hw.cpu, 10) + ' ' +
+    paint(C.steel, Math.round(state.hw.cpu) + '%') +
+    (state.hw.cpuTemp != null ? ' ' + paint(C.steel, Math.round(state.hw.cpuTemp) + '°C') : ''))
+  side.push(' ' + paint(C.dimmer, 'RAM ') + bar(state.hw.ram, 10) + ' ' + paint(C.steel, Math.round(state.hw.ram) + '%'))
+  const gpu = state.hw.gpuTemp != null ? Math.round(state.hw.gpuTemp) + '°C' : 'n/a'
+  const gpuUtil = state.hw.gpuUtil != null ? ' ' + state.hw.gpuUtil + '%' : ''
+  const gpuName = state.hw.gpuName ? ' ' + state.hw.gpuName : ''
+  side.push(' ' + paint(C.dimmer, 'GPU') + gpuName + ' ' + paint(C.steel, gpu + gpuUtil))
+  if (state.hw.diskTemp != null) side.push(' ' + paint(C.dimmer, 'SSD ') + paint(C.steel, Math.round(state.hw.diskTemp) + '°C'))
   const diskUsed = state.hw.diskTotal ? 100 * (1 - state.hw.diskFree / state.hw.diskTotal) : 0
   side.push(' ' + paint(C.dimmer, 'DISK') + ' ' + paint(C.steel, diskUsed ? Math.round(diskUsed) + '% used' : '—'))
   side.push(rule)
@@ -1072,7 +1147,7 @@ async function main() {
   bridge.ollama.available().then((ok) => { if (ok) bridge.ollama.warm() }).catch(() => {})
 
   refreshHw()
-  pollGpu()
+  startTempPolling()
   const hwTimer = setInterval(() => { refreshHw(); if (!oneShot) scheduleRender() }, 2000)
   hwTimer.unref?.()
 
