@@ -48,6 +48,8 @@ const C = {
   blue: '\x1b[38;2;86;138;214m',        // deep blue accents
   panel: '\x1b[48;2;14;18;25m',         // near-black panel
   panelAlt: '\x1b[48;2;21;27;37m',      // slightly lifted panel
+  panelSoft: '\x1b[48;2;28;34;44m',     // ~20% lifted: the translucent look
+  edgeSoft: '\x1b[38;2;58;78;104m',     // rounded corners of soft boxes
 }
 const bar1 = (s2) => C.panel + s2 + C.reset
 const paint = (c, s) => c + s + C.reset
@@ -324,27 +326,52 @@ function render() {
     push('', '', '', -1)
     push('', paint(C.dimmer, '  type a question, or ') + paint(C.accent, '/help') + paint(C.dimmer, '   \u00b7   open notepad \u00b7 read example.com'), '', -1)
   } else {
+    // name, then a vertical rule, then the text: 'you    │ ...' / 'JARVIS │ ...'
+    const nameHead = (name, color) => paint(color, C.bold + pad(name, 7)) + paint(C.edge, '\u2502 ')
+
+    // the procedure of one turn lives in a soft, rounded, full-width box
+    const pushThinkBox = (run) => {
+      const boxW = Math.max(12, chatW - 1)
+      const inner = Math.max(8, boxW - 4)
+      const top = '\u256d' + '\u2500'.repeat(Math.max(0, boxW - 2)) + '\u256e'
+      const bot = '\u2570' + '\u2500'.repeat(Math.max(0, boxW - 2)) + '\u256f'
+      push('', C.panelSoft + paint(C.edgeSoft, pad(top, chatW)) + C.reset, top, -2)
+      for (const line of run) {
+        for (const piece of wrap(line, inner)) {
+          const body = '\u2502 ' + pad(piece, inner) + ' \u2502'
+          push('', C.panelSoft + paint(C.dimmer, pad(body, chatW)) + C.reset, body, -2)
+        }
+      }
+      push('', C.panelSoft + paint(C.edgeSoft, pad(bot, chatW)) + C.reset, bot, -2)
+    }
+
     let prevRole = null
     for (let li = 0; li < state.lines.length; li++) {
       const l = state.lines[li]
       if (l.role === 'meta') continue
+
+      if (l.role === 'think') {
+        const run = []
+        while (li < state.lines.length && state.lines[li].role === 'think') { run.push(state.lines[li].text); li++ }
+        li--
+        pushThinkBox(run)
+        prevRole = 'think'
+        continue
+      }
+
       let head = '      '
       let color = C.bright
       let wide = '      '
       if (l.role === 'you') {
-        head = paint(C.blue, '\u258c ') + paint(C.steel, C.bold + pad('you', 7))
+        head = nameHead('you', C.steel)
         wide = ' '.repeat(9); color = C.steel
       } else if (l.role === 'jarvis') {
-        head = paint(C.blue, '\u258c ') + paint(C.dimmer, C.bold + pad('JARVIS', 7))
+        head = nameHead('JARVIS', C.dimmer)
         wide = ' '.repeat(9); color = C.bright
-      } else if (l.role === 'think') {
-        head = ' '.repeat(7) + paint(C.edge, '\u2503 '); wide = ' '.repeat(9); color = C.dimmer
       } else if (l.role === 'sys') {
-        head = ' '.repeat(7) + paint(C.edge, '\u00b7 '); wide = ' '.repeat(9); color = C.dimmer
+        head = ' '.repeat(7) + paint(C.edge, '\u00b7 ') + ' '; wide = ' '.repeat(9); color = C.dimmer
       }
-      if (l.role === 'you' && prevRole === 'jarvis') {
-        push('', '', '', -3)          // one blank row between an answer and the next question
-      }
+      if (l.role === 'you' && prevRole === 'jarvis') push('', '', '', -3)
       prevRole = l.role
       const headPlain = head.replace(/\x1b\[[0-9;]*m/g, '')
       const avail = Math.max(8, chatW - strWidth(headPlain))
@@ -466,10 +493,7 @@ function render() {
   screen.push('\u2500'.repeat(cols))
   rowSrc.push(-2)
 
-  // the box row shares the strip with the sidebar
-  out.push(pad(boxLeft, chatW) + (sideW ? paint(C.edge, '\u2502') + pad(side[animRows + bodyRows + 1] || '', sideW) : '') + '\r\n')
-  screen.push(pad(boxLeft.replace(/\x1b\[[0-9;]*m/g, ''), chatW) + (sideW ? '\u2502' : ''))
-  rowSrc.push(-2)
+
 
   const inputStart = 2 + strWidth(inputLabel)   // ' ' + label, 1-based
   const availInput = Math.max(8, cols - 1 - inputStart - 1)
@@ -477,14 +501,19 @@ function render() {
   const inputLine = state.selAll && view.text
     ? pad(' ' + inputLabel + '\x1b[7m' + view.text + '\x1b[0m', cols - 1)
     : pad(' ' + inputLabel + paint(C.bright, view.text), cols - 1)
-  out.push(C.panelAlt + inputLine + ' '.repeat(Math.max(0, cols - 1 - strWidth(inputLine))) + C.reset)
+  out.push(C.panelAlt + inputLine + ' '.repeat(Math.max(0, cols - 1 - strWidth(inputLine))) + C.reset + '\r\n')
   screen.push((' ' + inputLabel + view.text).replace(/\x1b\[[0-9;]*m/g, ''))
+  rowSrc.push(-2)
+
+  // detail box sits under the writing box, as the last row of the frame
+  out.push(pad(boxLeft, chatW) + (sideW ? paint(C.edge, '\u2502') + pad(side[animRows + bodyRows + 2] || '', sideW) : ''))
+  screen.push(pad(boxLeft.replace(/\x1b\[[0-9;]*m/g, ''), chatW) + (sideW ? '\u2502' : ''))
   rowSrc.push(-2)
   state.screen = screen
   state.rowSrc = rowSrc
   state.chatW = chatW
 
-  const inputRow = animRows + bodyRows + 3
+  const inputRow = animRows + bodyRows + 2   // rule, then the writing box; the detail box is below it
   const hintPlain = hint.replace(/\x1b\[[0-9;]*m/g, '')
   const hintCol = cols - strWidth(hintPlain) - 1
   if (hintCol > inputStart + strWidth(view.text) + 2) {
