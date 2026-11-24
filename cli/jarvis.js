@@ -10,6 +10,14 @@
  * sidebar keeps model, agent, tokens and hardware visible while you type.
  */
 
+// --session <name> gives this process its own conversation, so several Jarvis
+// windows (or a background question) can run at once without crossing streams.
+const sessAt = process.argv.indexOf('--session')
+if (sessAt > -1 && process.argv[sessAt + 1]) {
+  process.env.JARVIS_SESSION = String(process.argv[sessAt + 1])
+  process.argv.splice(sessAt, 2)
+}
+
 const os = require('os')
 const fs = require('fs')
 const path = require('path')

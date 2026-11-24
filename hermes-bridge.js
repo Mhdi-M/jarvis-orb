@@ -36,7 +36,13 @@ const HERMES_EXE =
   process.env.JARVIS_HERMES_EXE ||
   'C:\\Users\\Source\\AppData\\Local\\hermes\\hermes-agent\\.hermes\\bin\\hermes.exe'
 
-const STATE_FILE = path.join(__dirname, 'session.json')
+/* One session file per instance. Two Jarvis processes used to share
+ * session.json, so a background question and an interactive one clobbered each
+ * other's session id and token count. JARVIS_SESSION=<name> isolates them. */
+const SESSION_NAME = String(process.env.JARVIS_SESSION || '').trim().replace(/[^\w-]+/g, '-')
+const STATE_FILE = SESSION_NAME && SESSION_NAME !== 'default'
+  ? path.join(__dirname, 'data', 'sessions', SESSION_NAME + '.json')
+  : path.join(__dirname, 'session.json')
 const TIMEOUT_MS = 5 * 60 * 1000
 
 let sessionId = null
@@ -54,13 +60,19 @@ try {
 
 function saveSession(id) {
   sessionId = id
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify({ sessionId: id, tokens: lastInputTokens }, null, 2)) } catch {}
+  try {
+    fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true })
+    fs.writeFileSync(STATE_FILE, JSON.stringify({ sessionId: id, tokens: lastInputTokens }, null, 2))
+  } catch {}
 }
 
 function saveTokens(n) {
   if (!Number.isFinite(n)) return
   lastInputTokens = n
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify({ sessionId, tokens: n }, null, 2)) } catch {}
+  try {
+    fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true })
+    fs.writeFileSync(STATE_FILE, JSON.stringify({ sessionId, tokens: n }, null, 2))
+  } catch {}
 }
 
 function resetSession() {
