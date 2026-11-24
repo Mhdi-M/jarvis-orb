@@ -1641,10 +1641,12 @@ async function main() {
   if (oneShot) {
     await handle(oneShot)
     // print the transcript and exit (no TUI)
+    // piped output must be clean text: no colour codes when stdout is not a terminal
+    const ttyOut = !!process.stdout.isTTY
     for (const l of state.lines) {
-      const t = l.text
-      if (l.role === 'you') process.stdout.write(paint(C.steel, 'you › ') + t + '\n')
-      else if (l.role === 'sys') process.stdout.write(paint(C.dimmer, t) + '\n')
+      const t = ttyOut ? l.text : stripAnsi(l.text)
+      if (l.role === 'you') process.stdout.write((ttyOut ? paint(C.steel, 'you › ') : 'you › ') + t + '\n')
+      else if (l.role === 'sys') process.stdout.write((ttyOut ? paint(C.dimmer, t) : t) + '\n')
       else process.stdout.write(t + '\n')
     }
     process.exit(0)
