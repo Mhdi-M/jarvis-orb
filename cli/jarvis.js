@@ -35,6 +35,7 @@ const bg = require(path.join(ROOT, 'lib', 'bg'))
 const gateway = require(path.join(ROOT, 'lib', 'gateway'))
 const graph = require(path.join(ROOT, 'lib', 'graph'))
 const uia = require(path.join(ROOT, 'lib', 'uia'))
+const sysops = require(path.join(ROOT, 'lib', 'sys'))
 const { sampler } = require(path.join(ROOT, 'lib', 'cpu'))
 const memory = require(path.join(ROOT, 'lib', 'memory'))
 const monitorLib = require(path.join(ROOT, 'lib', 'monitor'))
@@ -1407,6 +1408,41 @@ async function command(raw) {
         const note = a.needs || a.role
         addLine('system', ' ' + flag + ' ' + String(a.name).padEnd(9) + String(a.model).padEnd(40) + note)
       }
+      break
+    }
+
+    case 'ctl': {
+      const parts = String(arg || '').trim().split(/\s+/)
+      const what = (parts[0] || '').toLowerCase()
+      if (!what || what === 'status') {
+        const st = await sysops.status()
+        sys('power      ' + (st.power || '?'))
+        sys('schemes    ' + st.schemes.join(' / '))
+        sys('brightness ' + st.brightness)
+        break
+      }
+      if (what === 'volume') {
+        const dir = parts[1] === 'up' ? 'up' : (parts[1] === 'mute' ? 'mute' : 'down')
+        const r = await sysops.volume(dir, parts[2])
+        sys(paint(C.dimmer, r.ok ? 'volume ' + r.action + ' x' + (r.steps || 1) : 'failed: ' + r.error))
+        break
+      }
+      if (what === 'power') {
+        const r = await sysops.power(parts.slice(1).join(' '))
+        sys(paint(C.dimmer, r.ok ? 'power plan -> ' + r.plan + ' (active: ' + r.active + ')' : 'failed: ' + r.error + ' ' + (r.schemes || []).join('/')))
+        break
+      }
+      if (what === 'lock') {
+        const r = await sysops.lockScreen()
+        sys(paint(C.dimmer, r.ok ? 'locking' : 'failed: ' + r.error))
+        break
+      }
+      if (what === 'brightness') {
+        const r = await sysops.brightness(parts[1])
+        sys(paint(C.dimmer, r.current ? 'brightness ' + r.current + '%' + (r.note ? ' (' + r.note + ')' : '') : 'no controllable backlight'))
+        break
+      }
+      sys(paint(C.dimmer, 'usage: /sys status | volume up|down|mute [n] | power <scheme> | lock | brightness [%]'))
       break
     }
 

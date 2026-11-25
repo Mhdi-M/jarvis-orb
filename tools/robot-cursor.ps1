@@ -5,7 +5,8 @@
   Stops when the stop file appears or on Esc.
 #>
 param(
-  [string]$StopFile = "$env:TEMP\jarvis-operator.stop"
+  [string]$StopFile = "$env:TEMP\jarvis-operator.stop",
+  [int]$Scale = 4
 )
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -28,7 +29,7 @@ public class OverlayForm : Form {
     get {
       CreateParams cp = base.CreateParams;
       cp.ExStyle |= 0x20;      // WS_EX_TRANSPARENT - clicks pass through
-      cp.ExStyle |= 0x80000;   // WS_EX_LAYERED
+      // no WS_EX_LAYERED: combined with TransparencyKey it cancels the window
       cp.ExStyle |= 0x80;      // WS_EX_TOOLWINDOW - no taskbar entry
       return cp;
     }
@@ -38,39 +39,54 @@ public class OverlayForm : Form {
 $form = New-Object OverlayForm
 $form.FormBorderStyle = 'None'
 $form.StartPosition = 'Manual'
-$form.Size = New-Object System.Drawing.Size(64, 64)
+$form.Size = New-Object System.Drawing.Size((8 * $Scale + 2), (8 * $Scale + 2))
 $form.TopMost = $true
 $form.ShowInTaskbar = $false
 $form.BackColor = [System.Drawing.Color]::FromArgb(255, 12, 16, 28)
-$form.TransparencyKey = [System.Drawing.Color]::FromArgb(255, 12, 16, 28)
+# TransparencyKey removed: with a themed BackColor it blanked the whole window
+
+# palette matches Jarvis; $scale keeps the pixels square
+$scale = $Scale
+$ink = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 126, 214, 168))
+$eye = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 127, 180, 216))
+$ant = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 240, 198, 116))
 $form.Add_Paint({
   param($s, $e)
   $g = $e.Graphics
-  $g.SmoothingMode = 'AntiAlias'
-  $tick = [int](([DateTime]::Now.Ticks % 18000000) / 1800000)
-  $blink = ($tick -eq 0 -or $tick -eq 1)
-
-  $body = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(235, 26, 34, 56))
-  $edge = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(255, 126, 214, 168)), 1.6
-  $g.FillEllipse($body, 8, 10, 40, 40)
-  $g.DrawEllipse($edge, 8, 10, 40, 40)
-
-  # antenna
-  $g.DrawLine($edge, 28, 10, 28, 2)
-  $g.FillEllipse($edge.Brush, 25, 0, 6, 6)
-
-  $eye = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 127, 180, 216))
-  if ($blink) {
-    $g.FillRectangle($eye, 17, 29, 8, 2)
-    $g.FillRectangle($eye, 31, 29, 8, 2)
-  } else {
-    $g.FillEllipse($eye, 16, 24, 9, 9)
-    $g.FillEllipse($eye, 31, 24, 9, 9)
+  $g.InterpolationMode = 'NearestNeighbor'
+  # 8x8 pixel robot, two frames: antenna bob + blink. 0 empty, 1 ink, 2 eye, 3 antenna
+  $f0 = @(
+    "00030000",
+    "00111100",
+    "01222110",
+    "01222110",
+    "01111110",
+    "00111100",
+    "01100110",
+    "01000010"
+  )
+  $f1 = @(
+    "00000000",
+    "00030000",
+    "00111100",
+    "01222110",
+    "01111110",
+    "00111100",
+    "01100110",
+    "01000010"
+  )
+  $f = 0
+  if ((([int](([DateTime]::Now.Ticks % 8000000) / 4000000)) % 2) -eq 1) { $f = 1 }
+  $frame = if ($f -eq 0) { $f0 } else { $f1 }
+  for ($y = 0; $y -lt 8; $y++) {
+    $row = $frame[$y]
+    for ($x = 0; $x -lt 8; $x++) {
+      $c = $row.Substring($x, 1)
+      if ($c -eq '0') { continue }
+      $b = switch ($c) { '1' { $ink } '2' { $eye } '3' { $ant } }
+      $g.FillRectangle($b, ($x * $scale), ($y * $scale), $scale, $scale)
+    }
   }
-  # mouth
-  $mouth = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(255, 168, 156, 240)), 2
-  $g.DrawArc($mouth, 20, 34, 16, 10, 0, 180)
-  $g.Dispose()
 })
 
 $timer = New-Object System.Windows.Forms.Timer
