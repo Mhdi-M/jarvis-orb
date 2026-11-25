@@ -928,6 +928,7 @@ const HELP = [
   ['/agents', 'list the agent registry: model, provider, status'],
   ['/agents run <name> <task>', 'send one task straight to one registered agent'],
   ['/cascade <task>', 'try agents in order until one answers (failover)'],
+  ['/browse <url>', 'open a page in your own Chrome (CDP, no bundled browser)'],
   ['/vpn [on|off|set|diag|bypass]', 'tunnel status; TUN diag; keep the provider off the tunnel'],
   ['/takeover <task>', 'let Jarvis drive the mouse and keyboard (robot cursor on)'],
   ['/takeover off', 'take the pointer back now'],
@@ -1392,6 +1393,31 @@ async function command(raw) {
         const flag = a.enabled ? (a.needs ? '~' : '+') : 'x'
         const note = a.needs || a.role
         addLine('system', ' ' + flag + ' ' + String(a.name).padEnd(9) + String(a.model).padEnd(40) + note)
+      }
+      break
+    }
+
+    case 'browse': {
+      const url = String(arg || '').trim()
+      if (!url) { sys(paint(C.dimmer, 'usage: /browse <url>   (drives your own Chrome over CDP)')); break }
+      sys(paint(C.dimmer, 'opening in your Chrome...'))
+      scheduleRender()
+      const py = process.env.JARVIS_PY || 'python'
+      const script = path.join(ROOT, 'tools', 'browse.py')
+      const env2 = Object.assign({}, process.env)
+      delete env2.HTTPS_PROXY; delete env2.HTTP_PROXY; delete env2.ALL_PROXY
+      const res = await new Promise((resolve) => {
+        execFile(py, [script, url, '--text'], { env: env2, timeout: 90000, windowsHide: true, maxBuffer: 8 << 20 },
+          (err, stdout) => resolve(String(stdout || '').trim() || (err ? err.message : '')))
+      })
+      let j = null
+      try { j = JSON.parse(res) } catch (e) {}
+      if (j && j.ok) {
+        addLine('jarvis', (j.title ? j.title + String.fromCharCode(10) : '') + (j.text || '').slice(0, 1200))
+        sys(paint(C.dimmer, j.url))
+      } else {
+        sys(paint(C.dimmer, 'browse failed: ' + ((j && j.error) || res).slice(0, 200)))
+        sys(paint(C.dimmer, 'is the debug Chrome running? chrome-debug-launch.cmd'))
       }
       break
     }
