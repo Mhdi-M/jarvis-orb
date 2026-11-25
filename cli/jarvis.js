@@ -30,6 +30,7 @@ const agents = require(path.join(ROOT, 'lib', 'agents'))
 const team = require(path.join(ROOT, 'lib', 'team'))
 const operator = require(path.join(ROOT, 'lib', 'operator'))
 const orb = require(path.join(ROOT, 'lib', 'orb'))
+const vpn = require(path.join(ROOT, 'lib', 'vpn'))
 const { sampler } = require(path.join(ROOT, 'lib', 'cpu'))
 const memory = require(path.join(ROOT, 'lib', 'memory'))
 const monitorLib = require(path.join(ROOT, 'lib', 'monitor'))
@@ -909,6 +910,7 @@ const HELP = [
   ['/agents', 'list the agent registry: model, provider, status'],
   ['/agents run <name> <task>', 'send one task straight to one registered agent'],
   ['/cascade <task>', 'try agents in order until one answers (failover)'],
+  ['/vpn [on|off|set|diag|bypass]', 'tunnel status; TUN diag; keep the provider off the tunnel'],
   ['/takeover <task>', 'let Jarvis drive the mouse and keyboard (robot cursor on)'],
   ['/takeover off', 'take the pointer back now'],
   ['/team <task>', 'upper manager: plan, dispatch specialists, merge'],
@@ -1373,6 +1375,46 @@ async function command(raw) {
         const note = a.needs || a.role
         addLine('system', ' ' + flag + ' ' + String(a.name).padEnd(9) + String(a.model).padEnd(40) + note)
       }
+      break
+    }
+
+    case 'vpn': {
+      const v = String(arg || '').trim()
+      if (v.startsWith('set ')) {
+        const exe = v.slice(4).replace(/^["']|["']$/g, '')
+        vpn.save({ exe, image: path.basename(exe) })
+        sys(paint(C.dimmer, 'vpn client recorded: ' + exe))
+        break
+      }
+      if (v === 'on') {
+        const r = await vpn.start()
+        sys(paint(C.dimmer, r.ok ? 'tunnel up in ' + r.secs + 's' : 'vpn start failed: ' + r.reason))
+        break
+      }
+      if (v === 'off') {
+        const r = await vpn.stop()
+        sys(paint(C.dimmer, r.ok ? 'tunnel down' : 'still up: ' + (r.reason || 'check the client')))
+        break
+      }
+      if (v === 'diag') {
+        const d = await vpn.diag()
+        sys('provider  ' + d.provider)
+        sys('tun       ' + (d.tun.length ? d.tun.join(', ') : 'off'))
+        sys('reachable ' + (d.reachable ? 'yes (direct)' : 'NO - the tunnel is swallowing it'))
+        sys('route     ' + (d.route || 'n/a') + '   gateway ' + (d.gateway || 'n/a'))
+        if (!d.reachable) sys(paint(C.dimmer, 'fix: /vpn bypass  (one UAC prompt, adds a host route that stays physical)'))
+        break
+      }
+      if (v === 'bypass') {
+        const b = await vpn.bypass()
+        sys(paint(C.dimmer, b.ok ? 'provider now bypasses the tunnel' : 'bypass failed: ' + b.reason))
+        if (b.cmd) sys(paint(C.dimmer, b.cmd))
+        break
+      }
+      const s2 = await vpn.status()
+      sys('proxy    ' + s2.proxy)
+      sys('listening ' + (s2.listening ? 'yes' : 'no') + '   tunnel ' + (s2.tunnelWorks ? 'carrying traffic' : 'dead') + '   exit ip ' + s2.ip)
+      sys(paint(C.dimmer, 'deepseek stays direct via NO_PROXY; /vpn on|off|set <exe>'))
       break
     }
 
