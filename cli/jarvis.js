@@ -1394,15 +1394,6 @@ async function command(raw) {
       break
     }
 
-    case 'notch': {
-      const { spawn } = require('child_process')
-      spawn('cmd.exe', ['/c', 'start', '', path.join(ROOT, '..', 'jarvis-notch', 'node_modules', '.bin', 'electron.cmd'), '.'], { cwd: path.join(ROOT, '..', 'jarvis-notch'), detached: true, stdio: 'ignore' })
-      sys('notch launching')
-      break
-    }
-
-    default:
-      sys(`unknown command /${cmd} — /help`)
   }
   scheduleRender()
 }
