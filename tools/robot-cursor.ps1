@@ -50,8 +50,17 @@ $scale = $Scale
 $ink = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 126, 214, 168))
 $eye = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 127, 180, 216))
 $ant = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 240, 198, 116))
+$LOG = "$env:TEMP\robot-paint.log"
+function Note([string]$m) { try { Add-Content -Path $LOG -Value ((Get-Date -Format 'HH:mm:ss.fff') + ' ' + $m) } catch {} }
+Note ('start pid=' + $PID + ' scale=' + $Scale)
+
+$paints = 0
 $form.Add_Paint({
   param($s, $e)
+  $script:paints++
+  if ($script:paints -le 3 -or $script:paints % 100 -eq 0) {
+    Note ('paint #' + $script:paints + ' @ ' + $form.Location.X + ',' + $form.Location.Y + ' visible=' + $form.Visible + ' opacity=' + $form.Opacity)
+  }
   $g = $e.Graphics
   $g.InterpolationMode = 'NearestNeighbor'
   # 8x8 pixel robot, two frames: antenna bob + blink. 0 empty, 1 ink, 2 eye, 3 antenna
