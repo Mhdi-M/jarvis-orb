@@ -26,6 +26,7 @@ const readline = require('readline')
 
 const ROOT = path.join(__dirname, '..')
 const bridge = require(path.join(ROOT, 'hermes-bridge'))
+const agents = require(path.join(ROOT, 'lib', 'agents'))
 const { sampler } = require(path.join(ROOT, 'lib', 'cpu'))
 const memory = require(path.join(ROOT, 'lib', 'memory'))
 const monitorLib = require(path.join(ROOT, 'lib', 'monitor'))
@@ -897,6 +898,9 @@ function fetchPage(url) {
 const HELP = [
   ['/help', 'this list'],
   ['/look [question]', 'screenshot the screen and ask the vision specialist'],
+  ['/agents', 'list the agent registry: model, provider, status'],
+  ['/agents run <name> <task>', 'send one task straight to one registered agent'],
+  ['/cascade <task>', 'try agents in order until one answers (failover)'],
   ['/think [on|off]', 'show or hide the procedure under each question'],
   ['/timing [on|off]', 'show or hide the +0.0s timings on those lines'],
   ['/model [name]', 'show or set the model (used for the next new session)'],
@@ -932,7 +936,6 @@ const HELP = [
   ['/local on|off', 'answer from the local model only'],
   ['/skills · /skill show|rm <name>', 'manage self-written skills'],
   ['/profile', 'what Jarvis learned about your style'],
-  ['/notch', 'start the monitoring notch'],
   ['/quit', 'leave'],
 ]
 
@@ -1331,6 +1334,50 @@ async function command(raw) {
       else if (arg === 'off') state.showTiming = false
       else state.showTiming = !state.showTiming
       sys('timing ' + (state.showTiming ? 'ON' : 'OFF'))
+      break
+    }
+
+    case 'agents': {
+      const aParts = String(arg || '').trim().split(/\s+/)
+      if (aParts[0] === 'run') {
+        const who = aParts[1]
+        const task = aParts.slice(2).join(' ')
+        if (!who || !task) { sys(paint(C.dimmer, 'usage: /agents run <name> <task>')); break }
+        const one = agents.get(who)
+        if (!one) { sys(paint(C.dimmer, 'unknown agent: ' + who + ' - try /agents')); break }
+        sys(paint(C.dimmer, '-> ' + one.name + ' (' + one.model + ')'))
+        scheduleRender()
+        const r1 = await agents.run(one, task)
+        addLine('jarvis', r1.text)
+        sys(paint(C.dimmer, '  ' + (r1.status === 'ok' ? 'ok' : r1.status) + ' in ' + r1.secs + 's on ' + one.model))
+        break
+      }
+      const rows = agents.list()
+      const ready = rows.filter((a) => a.enabled)
+      addLine('system', ready.length + ' ready, ' + rows.length + ' registered')
+      for (const a of rows) {
+        const flag = a.enabled ? (a.needs ? '~' : '+') : 'x'
+        const note = a.needs || a.role
+        addLine('system', ' ' + flag + ' ' + String(a.name).padEnd(9) + String(a.model).padEnd(40) + note)
+      }
+      break
+    }
+
+    case 'cascade': {
+      if (!arg) { sys(paint(C.dimmer, 'usage: /cascade <task>  - tries agents in order until one answers')); break }
+      const res = await agents.cascade(arg, {
+        onAttempt: (e) => {
+          if (e.phase === 'start') sys(paint(C.dimmer, '-> ' + e.agent + ' (' + e.model + ')'))
+          else sys(paint(C.dimmer, '   ' + (e.status === 'ok' ? 'ok' : e.status) + ' ' + e.agent + ' ' + e.secs + 's'))
+          scheduleRender()
+        }
+      })
+      if (res.answer) {
+        addLine('jarvis', res.answer)
+        sys(paint(C.dimmer, 'answered by ' + res.agent + ' after ' + res.attempts.length + ' attempt(s), ' + res.secs + 's total'))
+      } else {
+        sys(paint(C.dimmer, 'no agent answered - ' + res.attempts.map((a) => a.agent + ':' + a.status).join(', ')))
+      }
       break
     }
 
