@@ -216,16 +216,34 @@ function askVision(file, question) {
       (err, stdout) => {
         const out = String(stdout || '').trim()
         if (out) return resolve(out)
-        resolve(err ? '\u2717 vision specialist failed: ' + err.message : '\u2717 no answer')
+        // cloud failed (quota / 404 / 503) -> fall back to local Ollama
+        sys(paint(C.dimmer, 'cloud vision failed; falling back to qwen2.5vl:3b...'))
+        scheduleRender()
+        askLocalVision(file, question).then(resolve)
       })
   })
 }
 
-/* ---------------------------------------------------------------- hardware */
-/* state.hw: cpu, ram, gpuTemp, gpuName, gpuUtil, cpuTemp, diskTemp,
- * diskFree, diskTotal */
-
-// --- temp parsing inlined (from lib/temps.mjs) ---
+/* call local Ollama vision model directly; used when cloud quota is spent */
+function askLocalVision(file, question) {
+  return new Promise((resolve) => {
+    const b64 = fs.readFileSync(file).toString('base64')
+    const body = JSON.stringify({
+      model: 'qwen2.5vl:3b',
+      prompt: 'In one short sentence: ' + question,
+      images: [b64],
+      stream: false
+    })
+    const opts = { hostname: '127.0.0.1', port: 11434, path: '/api/generate', method: 'POST', headers: { 'Content-Type': 'application/json' } }
+    const req = http.request(opts, res => {
+      let d = ''; res.on('data', c => d += c); res.on('end', () => {
+        try { const j = JSON.parse(d); resolve((j.response || '').trim()) } catch (e) { resolve('local vision error: ' + e.message) }
+      })
+    })
+    req.on('error', e => resolve('local vision connect error: ' + e.message))
+    req.write(body); req.end()
+  })
+}
 function kelvinTenthsToC(raw) {
   const n = parseFloat(String(raw == null ? '' : raw).replace(',', '.'))
   if (!Number.isFinite(n) || n <= 0) return null
