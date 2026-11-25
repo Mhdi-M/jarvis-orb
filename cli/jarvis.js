@@ -31,6 +31,7 @@ const team = require(path.join(ROOT, 'lib', 'team'))
 const operator = require(path.join(ROOT, 'lib', 'operator'))
 const orb = require(path.join(ROOT, 'lib', 'orb'))
 const vpn = require(path.join(ROOT, 'lib', 'vpn'))
+const bg = require(path.join(ROOT, 'lib', 'bg'))
 const { sampler } = require(path.join(ROOT, 'lib', 'cpu'))
 const memory = require(path.join(ROOT, 'lib', 'memory'))
 const monitorLib = require(path.join(ROOT, 'lib', 'monitor'))
@@ -928,6 +929,8 @@ const HELP = [
   ['/agents', 'list the agent registry: model, provider, status'],
   ['/agents run <name> <task>', 'send one task straight to one registered agent'],
   ['/cascade <task>', 'try agents in order until one answers (failover)'],
+  ['/bg <task>', 'run a task in the background, no window, toast on finish'],
+  ['/bg list|log <id>|kill <id>', 'manage background jobs'],
   ['/browse <url>', 'open a page in your own Chrome (CDP, no bundled browser)'],
   ['/vpn [on|off|set|diag|bypass]', 'tunnel status; TUN diag; keep the provider off the tunnel'],
   ['/takeover <task>', 'let Jarvis drive the mouse and keyboard (robot cursor on)'],
@@ -1394,6 +1397,34 @@ async function command(raw) {
         const note = a.needs || a.role
         addLine('system', ' ' + flag + ' ' + String(a.name).padEnd(9) + String(a.model).padEnd(40) + note)
       }
+      break
+    }
+
+    case 'bg': {
+      const t = String(arg || '').trim()
+      if (!t || t === 'list') {
+        const jobs = bg.list().slice(0, 8)
+        if (!jobs.length) { sys(paint(C.dimmer, 'no background jobs - run: /bg <task>')); break }
+        for (const j of jobs) {
+          sys(pad(j.id, 12) + pad(j.status, 8) + String(j.task).slice(0, 52))
+        }
+        sys(paint(C.dimmer, '/bg log <id>   /bg kill <id>'))
+        break
+      }
+      if (t.startsWith('log ')) {
+        const id = t.slice(4).trim()
+        const text = bg.log(id, 20).trim()
+        sys(text || 'no log yet for ' + id)
+        break
+      }
+      if (t.startsWith('kill ')) {
+        const ok = bg.kill(t.slice(5).trim())
+        sys(paint(C.dimmer, ok ? 'job stopped' : 'no such job'))
+        break
+      }
+      const job = bg.start(t)
+      sys(paint(C.dimmer, 'running in background: ' + job.id + ' (no window, toast when done)'))
+      sys(paint(C.dimmer, 'log: data/bg/' + job.id + '.log'))
       break
     }
 
