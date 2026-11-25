@@ -34,6 +34,7 @@ const vpn = require(path.join(ROOT, 'lib', 'vpn'))
 const bg = require(path.join(ROOT, 'lib', 'bg'))
 const gateway = require(path.join(ROOT, 'lib', 'gateway'))
 const graph = require(path.join(ROOT, 'lib', 'graph'))
+const uia = require(path.join(ROOT, 'lib', 'uia'))
 const { sampler } = require(path.join(ROOT, 'lib', 'cpu'))
 const memory = require(path.join(ROOT, 'lib', 'memory'))
 const monitorLib = require(path.join(ROOT, 'lib', 'monitor'))
@@ -935,6 +936,7 @@ const HELP = [
   ['/agents', 'list the agent registry: model, provider, status'],
   ['/agents run <name> <task>', 'send one task straight to one registered agent'],
   ['/cascade <task>', 'try agents in order until one answers (failover)'],
+  ['/ui list|click|type', 'accessibility-first control of desktop apps'],
   ['/graph [open]', 'render the agent brain network to data/graph.html'],
   ['/serve [on|stop|token]', 'local gateway: /status /ask /bg for any client'],
   ['/bg <task>', 'run a task in the background, no window, toast on finish'],
@@ -1405,6 +1407,38 @@ async function command(raw) {
         const note = a.needs || a.role
         addLine('system', ' ' + flag + ' ' + String(a.name).padEnd(9) + String(a.model).padEnd(40) + note)
       }
+      break
+    }
+
+    case 'ui': {
+      const parts = String(arg || '').trim().split(/\s+/)
+      const what = parts[0] || 'list'
+      if (what === 'list') {
+        const win = parts.slice(1).join(' ') || 'chrome'
+        const r = await uia.list(win, 14)
+        if (!r.ok) { sys(paint(C.dimmer, 'uia: ' + r.error)); break }
+        sys(paint(C.dimmer, 'window: ' + r.window + '  (' + r.count + ' elements, showing ' + Math.min(14, r.count) + ')'))
+        for (const e of (r.elements || []).slice(0, 14)) {
+          sys(pad(e.type || '?', 12) + pad(String(e.name).slice(0, 34), 36) + (e.enabled ? '' : 'disabled '))
+        }
+        break
+      }
+      if (what === 'click' || what === 'type') {
+        const rest = parts.slice(1)
+        if (rest.length < 2) { sys(paint(C.dimmer, 'usage: /ui click <window> <element>   |   /ui type <window> <field> <text>')); break }
+        const win = rest[0]
+        if (what === 'click') {
+          const r = await uia.click(win, rest.slice(1).join(' '))
+          sys(paint(C.dimmer, r.ok ? 'clicked ' + (r.element || '') + ' via ' + r.via : 'failed: ' + r.error))
+        } else {
+          const field = rest[1]
+          const text = rest.slice(2).join(' ')
+          const r = await uia.typeInto(win, field, text)
+          sys(paint(C.dimmer, r.ok ? 'typed into ' + (r.element || field) + ' via ' + r.via : 'failed: ' + r.error))
+        }
+        break
+      }
+      sys(paint(C.dimmer, 'usage: /ui list <window> | /ui click <window> <element> | /ui type <window> <field> <text>'))
       break
     }
 
