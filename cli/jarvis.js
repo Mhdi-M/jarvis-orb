@@ -222,7 +222,7 @@ function askVision(file, question) {
         /* The specialist reports its own failures as ordinary text ("Vision
          * analysis failed - ...", "rate limit", "misconfigured"), so an empty
          * check is not enough: those strings must also trigger the fallback. */
-        const broken = /vision analysis failed|rate limit|quota|misconfigured|not found|no such model|40[34]|503/i.test(out)
+        const broken = /vision analysis failed|vision_analyze (?:tool )?is broken|non-existent|not exist|rate limit|quota|misconfigured|is unavailable|40[34]|503/i.test(out)
         if (out && !broken) return resolve(out)
         // cloud failed (quota / 404 / 503 / misconfigured) -> fall back to local Ollama
         sys(paint(C.dimmer, 'cloud vision failed; falling back to qwen2.5vl:3b...'))
