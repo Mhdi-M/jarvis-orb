@@ -29,6 +29,7 @@ const bridge = require(path.join(ROOT, 'hermes-bridge'))
 const agents = require(path.join(ROOT, 'lib', 'agents'))
 const team = require(path.join(ROOT, 'lib', 'team'))
 const operator = require(path.join(ROOT, 'lib', 'operator'))
+const orb = require(path.join(ROOT, 'lib', 'orb'))
 const { sampler } = require(path.join(ROOT, 'lib', 'cpu'))
 const memory = require(path.join(ROOT, 'lib', 'memory'))
 const monitorLib = require(path.join(ROOT, 'lib', 'monitor'))
@@ -552,7 +553,12 @@ function render() {
   // ---- the animation strip: fixed at the top, never part of the transcript
   const anim = []
   if (animRows) {
-    const frame = ANIM[state.busy ? state.spin % ANIM.length : 0]
+    /* while busy the strip is the dotted orb for the current activity, not the
+     * static banner: the motion itself says what is happening. */
+    const orbLines = state.busy
+      ? orb.render(state.orbState || 'working', Math.max(10, chatW), animRows, (state.spin || 0) * 0.22)
+      : null
+    const frame = orbLines && orbLines.length ? orbLines : ANIM[state.busy ? state.spin % ANIM.length : 0]
     for (let a = 0; a < animRows; a++) {
       const line = cut(frame[a] || '', Math.max(4, chatW))
       anim.push(paint(C.accent, line))
@@ -1420,11 +1426,13 @@ async function command(raw) {
           } else if (e.phase === 'plan') {
             sys(paint(C.dimmer, 'plan: ' + e.status + (e.note ? ' (' + e.note + ')' : '')))
           } else if (e.phase === 'dispatch') {
+            state.orbState = 'connecting'
             sys(paint(C.dimmer, '-> ' + e.agent + ' working'))
           } else if (e.phase === 'agent' && e.attempt) {
             const a = e.attempt
             sys(paint(C.dimmer, '   ' + (a.status === 'ok' ? 'ok' : a.status) + ' ' + a.agent + ' ' + a.secs + 's'))
           } else if (e.phase === 'merge') {
+            state.orbState = 'weaving'
             sys(paint(C.dimmer, 'merging (' + e.status + ' ' + e.secs + 's)'))
           }
           scheduleRender()

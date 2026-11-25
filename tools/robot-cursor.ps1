@@ -20,7 +20,22 @@ public class Win {
 
 if (Test-Path $StopFile) { Remove-Item $StopFile -Force -ErrorAction SilentlyContinue }
 
-$form = New-Object System.Windows.Forms.Form
+Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @"
+using System;
+using System.Windows.Forms;
+public class OverlayForm : Form {
+  protected override CreateParams CreateParams {
+    get {
+      CreateParams cp = base.CreateParams;
+      cp.ExStyle |= 0x20;      // WS_EX_TRANSPARENT - clicks pass through
+      cp.ExStyle |= 0x80000;   // WS_EX_LAYERED
+      cp.ExStyle |= 0x80;      // WS_EX_TOOLWINDOW - no taskbar entry
+      return cp;
+    }
+  }
+}
+"@
+$form = New-Object OverlayForm
 $form.FormBorderStyle = 'None'
 $form.StartPosition = 'Manual'
 $form.Size = New-Object System.Drawing.Size(64, 64)
@@ -56,12 +71,6 @@ $form.Add_Paint({
   $mouth = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(255, 168, 156, 240)), 2
   $g.DrawArc($mouth, 20, 34, 16, 10, 0, 180)
   $g.Dispose()
-})
-
-# click-through + tool window: the overlay is decoration, never a target
-$form.Add_Shown({
-  $cp = New-Object System.Windows.Forms.CreateParams
-  $cp.ExStyle = $cp.ExStyle -bor 0x20 -bor 0x80000 -bor 0x80
 })
 
 $timer = New-Object System.Windows.Forms.Timer
