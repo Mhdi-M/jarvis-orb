@@ -12,7 +12,15 @@
     "test": "node --test tests/",
     "stress": "node tests/stress.mjs"
   },
-  "keywords": ["assistant", "terminal", "cli", "hermes"],
+  "keywords": [
+    "assistant",
+    "terminal",
+    "cli",
+    "hermes"
+  ],
   "license": "ISC",
-  "type": "commonjs"
+  "type": "commonjs",
+  "dependencies": {
+    "thinking-orbs": "^0.3.2"
+  }
 }

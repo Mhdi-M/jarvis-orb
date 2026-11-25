@@ -27,6 +27,8 @@ const readline = require('readline')
 const ROOT = path.join(__dirname, '..')
 const bridge = require(path.join(ROOT, 'hermes-bridge'))
 const agents = require(path.join(ROOT, 'lib', 'agents'))
+const team = require(path.join(ROOT, 'lib', 'team'))
+const operator = require(path.join(ROOT, 'lib', 'operator'))
 const { sampler } = require(path.join(ROOT, 'lib', 'cpu'))
 const memory = require(path.join(ROOT, 'lib', 'memory'))
 const monitorLib = require(path.join(ROOT, 'lib', 'monitor'))
@@ -901,6 +903,11 @@ const HELP = [
   ['/agents', 'list the agent registry: model, provider, status'],
   ['/agents run <name> <task>', 'send one task straight to one registered agent'],
   ['/cascade <task>', 'try agents in order until one answers (failover)'],
+  ['/takeover <task>', 'let Jarvis drive the mouse and keyboard (robot cursor on)'],
+  ['/takeover off', 'take the pointer back now'],
+  ['/team <task>', 'upper manager: plan, dispatch specialists, merge'],
+  ['/team log', 'what the team learned about its own agents'],
+  ['/team learn <task>', 'run it, then draft a skill from the procedure'],
   ['/think [on|off]', 'show or hide the procedure under each question'],
   ['/timing [on|off]', 'show or hide the +0.0s timings on those lines'],
   ['/model [name]', 'show or set the model (used for the next new session)'],
@@ -1359,6 +1366,76 @@ async function command(raw) {
         const flag = a.enabled ? (a.needs ? '~' : '+') : 'x'
         const note = a.needs || a.role
         addLine('system', ' ' + flag + ' ' + String(a.name).padEnd(9) + String(a.model).padEnd(40) + note)
+      }
+      break
+    }
+
+    case 'takeover': {
+      const tArg = String(arg || '').trim()
+      if (!tArg || tArg === 'off') {
+        await operator.stopOverlay()
+        sys(paint(C.dimmer, 'robot released - the pointer is yours'))
+        break
+      }
+      sys(paint(C.dimmer, 'robot driving: click-through overlay on; /takeover off to stop'))
+      scheduleRender()
+      const r = await operator.run(tArg, {
+        onTrace: (e) => {
+          if (e.phase === 'overlay') sys(paint(C.dimmer, 'overlay ' + e.status))
+          scheduleRender()
+        }
+      })
+      if (r.text) addLine('jarvis', r.text)
+      sys(paint(C.dimmer, 'robot released after ' + r.secs + 's (' + r.status + ')'))
+      break
+    }
+
+    case 'team': {
+      const tArg = String(arg || '').trim()
+      if (!tArg) { sys(paint(C.dimmer, 'usage: /team <task>   |   /team log   |   /team skills')); break }
+      if (tArg === 'log') {
+        sys(paint(C.dimmer, 'team lessons: ' + team.lessonLine()))
+        for (const [n, v] of Object.entries(team.lessons().agents || {})) {
+          const tot = (v.ok || 0) + (v.fail || 0)
+          sys(pad(n, 10) + String(v.ok || 0) + ' ok / ' + String(v.fail || 0) + ' fail  ' + (v.secs ? '~' + v.secs + 's' : ''))
+        }
+        break
+      }
+      if (tArg === 'skills') {
+        let files = []
+        try { files = fs.readdirSync(team.DRAFTS) } catch (e) {}
+        if (!files.length) { sys(paint(C.dimmer, 'no skill drafts yet - run: /team learn <task>')); break }
+        for (const f of files) sys(' ' + f)
+        sys(paint(C.dimmer, 'drafts live in ' + team.DRAFTS))
+        break
+      }
+
+      const learn = tArg.startsWith('learn ')
+      const task = learn ? tArg.slice(6).trim() : tArg
+      const res = await team.run(task, {
+        onTrace: (e) => {
+          if (e.phase === 'plan' && e.subtasks) {
+            sys(paint(C.dimmer, 'plan: ' + e.subtasks.length + ' subtask(s)'))
+            e.subtasks.forEach((st, i) => sys(paint(C.dimmer, '  ' + (i + 1) + '. ' + st.agent + ' - ' + st.task.slice(0, 64))))
+          } else if (e.phase === 'plan') {
+            sys(paint(C.dimmer, 'plan: ' + e.status + (e.note ? ' (' + e.note + ')' : '')))
+          } else if (e.phase === 'dispatch') {
+            sys(paint(C.dimmer, '-> ' + e.agent + ' working'))
+          } else if (e.phase === 'agent' && e.attempt) {
+            const a = e.attempt
+            sys(paint(C.dimmer, '   ' + (a.status === 'ok' ? 'ok' : a.status) + ' ' + a.agent + ' ' + a.secs + 's'))
+          } else if (e.phase === 'merge') {
+            sys(paint(C.dimmer, 'merging (' + e.status + ' ' + e.secs + 's)'))
+          }
+          scheduleRender()
+        }
+      })
+      if (res.answer) addLine('jarvis', res.answer)
+      else sys(paint(C.dimmer, 'the team produced no answer - ' + (res.attempts || []).map((a) => a.agent + ':' + a.status).join(', ')))
+      sys(paint(C.dimmer, 'team: ' + res.agent + ' in ' + res.secs + 's, ' + (res.attempts || []).length + ' agent call(s)'))
+      if (learn) {
+        const f = await team.draftSkill(res)
+        sys(paint(C.dimmer, f ? 'skill draft saved: ' + f : 'no reusable procedure found'))
       }
       break
     }
