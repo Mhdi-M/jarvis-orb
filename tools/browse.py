@@ -22,7 +22,11 @@ CDP = "http://127.0.0.1:9222"
 
 
 def parse_fill(arg):
-    m = re.match(r'([^=]+)=(.*)', arg)
+    # 'selector::text' is preferred: '=' appears inside CSS attribute selectors
+    if '::' in arg:
+        sel, text = arg.split('::', 1)
+        return sel.strip(), text
+    m = re.match(r'(.+?)=(.*)', arg)
     if not m:
         return None, None
     return m.group(1).strip(), m.group(2)
@@ -39,6 +43,7 @@ def main():
     hover_sel = None
     double_click_sel = None
     select_sel = None
+    scroll_dy = None
     want_text = True
     i = 2
     while i < len(sys.argv):
@@ -56,6 +61,9 @@ def main():
             i += 2
         elif sys.argv[i] == '--double-click' and i + 1 < len(sys.argv):
             double_click_sel = sys.argv[i + 1]
+            i += 2
+        elif sys.argv[i] == '--scroll' and i + 1 < len(sys.argv):
+            scroll_dy = int(sys.argv[i + 1])
             i += 2
         elif sys.argv[i] == '--select' and i + 1 < len(sys.argv):
             select_sel = sys.argv[i + 1]
@@ -92,6 +100,9 @@ def main():
                 page.dblclick(double_click_sel, timeout=10000)
             elif select_sel:
                 page.select_option(select_sel, timeout=10000)
+            elif scroll_dy is not None:
+                page.mouse.wheel(0, scroll_dy)
+                page.wait_for_timeout(400)
 
             title = page.title()
             text = ""

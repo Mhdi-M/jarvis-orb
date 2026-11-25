@@ -33,6 +33,7 @@ const orb = require(path.join(ROOT, 'lib', 'orb'))
 const vpn = require(path.join(ROOT, 'lib', 'vpn'))
 const bg = require(path.join(ROOT, 'lib', 'bg'))
 const gateway = require(path.join(ROOT, 'lib', 'gateway'))
+const graph = require(path.join(ROOT, 'lib', 'graph'))
 const { sampler } = require(path.join(ROOT, 'lib', 'cpu'))
 const memory = require(path.join(ROOT, 'lib', 'memory'))
 const monitorLib = require(path.join(ROOT, 'lib', 'monitor'))
@@ -217,8 +218,12 @@ function askVision(file, question) {
       { windowsHide: true, timeout: 180000, maxBuffer: 4 << 20 },
       (err, stdout) => {
         const out = String(stdout || '').trim()
-        if (out) return resolve(out)
-        // cloud failed (quota / 404 / 503) -> fall back to local Ollama
+        /* The specialist reports its own failures as ordinary text ("Vision
+         * analysis failed - ...", "rate limit", "misconfigured"), so an empty
+         * check is not enough: those strings must also trigger the fallback. */
+        const broken = /vision analysis failed|rate limit|quota|misconfigured|not found|no such model|40[34]|503/i.test(out)
+        if (out && !broken) return resolve(out)
+        // cloud failed (quota / 404 / 503 / misconfigured) -> fall back to local Ollama
         sys(paint(C.dimmer, 'cloud vision failed; falling back to qwen2.5vl:3b...'))
         scheduleRender()
         askLocalVision(file, question).then(resolve)
@@ -930,6 +935,7 @@ const HELP = [
   ['/agents', 'list the agent registry: model, provider, status'],
   ['/agents run <name> <task>', 'send one task straight to one registered agent'],
   ['/cascade <task>', 'try agents in order until one answers (failover)'],
+  ['/graph [open]', 'render the agent brain network to data/graph.html'],
   ['/serve [on|stop|token]', 'local gateway: /status /ask /bg for any client'],
   ['/bg <task>', 'run a task in the background, no window, toast on finish'],
   ['/bg list|log <id>|kill <id>', 'manage background jobs'],
@@ -1398,6 +1404,18 @@ async function command(raw) {
         const flag = a.enabled ? (a.needs ? '~' : '+') : 'x'
         const note = a.needs || a.role
         addLine('system', ' ' + flag + ' ' + String(a.name).padEnd(9) + String(a.model).padEnd(40) + note)
+      }
+      break
+    }
+
+    case 'graph': {
+      const g = graph.write()
+      sys('brain graph: ' + g.agents + ' agents, ' + g.skills + ' skills, ' + g.keys + ' keys')
+      sys(paint(C.dimmer, g.file))
+      if (String(arg || '').includes('open')) {
+        const { spawn: sp } = require('child_process')
+        sp('cmd.exe', ['/c', 'start', '', g.file], { detached: true, stdio: 'ignore' }).unref()
+        sys(paint(C.dimmer, 'opening in the browser'))
       }
       break
     }
