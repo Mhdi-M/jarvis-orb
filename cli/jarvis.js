@@ -32,6 +32,7 @@ const operator = require(path.join(ROOT, 'lib', 'operator'))
 const orb = require(path.join(ROOT, 'lib', 'orb'))
 const vpn = require(path.join(ROOT, 'lib', 'vpn'))
 const bg = require(path.join(ROOT, 'lib', 'bg'))
+const gateway = require(path.join(ROOT, 'lib', 'gateway'))
 const { sampler } = require(path.join(ROOT, 'lib', 'cpu'))
 const memory = require(path.join(ROOT, 'lib', 'memory'))
 const monitorLib = require(path.join(ROOT, 'lib', 'monitor'))
@@ -929,6 +930,7 @@ const HELP = [
   ['/agents', 'list the agent registry: model, provider, status'],
   ['/agents run <name> <task>', 'send one task straight to one registered agent'],
   ['/cascade <task>', 'try agents in order until one answers (failover)'],
+  ['/serve [on|stop|token]', 'local gateway: /status /ask /bg for any client'],
   ['/bg <task>', 'run a task in the background, no window, toast on finish'],
   ['/bg list|log <id>|kill <id>', 'manage background jobs'],
   ['/browse <url>', 'open a page in your own Chrome (CDP, no bundled browser)'],
@@ -1397,6 +1399,25 @@ async function command(raw) {
         const note = a.needs || a.role
         addLine('system', ' ' + flag + ' ' + String(a.name).padEnd(9) + String(a.model).padEnd(40) + note)
       }
+      break
+    }
+
+    case 'serve': {
+      const v = String(arg || '').trim()
+      if (v === 'stop') { gateway.stop(); sys(paint(C.dimmer, 'gateway stopped')); break }
+      const st = gateway.status()
+      if (v === '' ) {
+        sys('gateway ' + (st.running ? 'running on 127.0.0.1:' + st.port : 'stopped'))
+        sys(paint(C.dimmer, 'token ' + st.tokenHint + '   /serve on | stop | token'))
+        break
+      }
+      if (v === 'token') { sys(gateway.state().token); break }
+      if (v === 'on') {
+        const r = await gateway.start()
+        sys(paint(C.dimmer, r.ok ? 'gateway on 127.0.0.1:' + r.port + ' (token required)' : 'gateway failed: ' + r.error))
+        break
+      }
+      sys(paint(C.dimmer, 'usage: /serve [on|stop|token]'))
       break
     }
 
