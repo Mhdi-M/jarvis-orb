@@ -20,6 +20,8 @@ test('ctrl keys that the TUI binds', () => {
   assert.deepEqual(parseInput('\x01'), [{ type: 'ctrl', key: 'a' }])
   assert.deepEqual(parseInput('\x05'), [{ type: 'ctrl', key: 'e' }])
   assert.deepEqual(parseInput('\x15'), [{ type: 'ctrl', key: 'u' }])
+  assert.deepEqual(parseInput('\x16'), [{ type: 'ctrl', key: 'v' }])
+  assert.deepEqual(parseInput('\x18'), [{ type: 'ctrl', key: 'x' }])
 })
 
 test('arrow keys', () => {

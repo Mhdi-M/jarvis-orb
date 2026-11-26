@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   stripAnsi, maxScroll, clampScroll, windowRows,
-  normalizeSelection, selectionText, pasteLine,
+  normalizeSelection, selectionText, pasteLine, wordBounds, lineBounds,
 } from '../lib/screen.mjs'
 
 test('stripAnsi removes colour codes but keeps text', () => {
@@ -75,4 +75,21 @@ test('pasting code with newlines does not keep newlines', () => {
   const line = pasteLine(code)
   assert.ok(!line.includes('\n'), 'no newline may survive a paste')
   assert.equal(line, 'function f() { return 1 }')
+})
+
+test('wordBounds finds the word under a double-click', () => {
+  const line = 'the answer is 391 and that is final'
+  assert.deepEqual(wordBounds(line, 15), { c1: 15, c2: 17, word: '391' })
+  assert.equal(wordBounds(line, 1).word, 'the')
+  assert.equal(wordBounds(line, 5).word, 'answer')
+  // clicking a space picks the word after it
+  assert.equal(wordBounds(line, 14).word, '391')
+  // paths and urls stay one token
+  assert.equal(wordBounds('see C:/tmp/a.png now', 10).word, 'C:/tmp/a.png')
+  assert.equal(wordBounds('   ', 2), null)
+})
+
+test('lineBounds trims trailing spaces', () => {
+  assert.deepEqual(lineBounds('hello   '), { c1: 1, c2: 5 })
+  assert.deepEqual(lineBounds(''), { c1: 1, c2: 1 })
 })

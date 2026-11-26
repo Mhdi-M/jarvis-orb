@@ -58,6 +58,8 @@ const bench = require(path.join(ROOT, 'lib', 'bench'))
 const preview = require(path.join(ROOT, 'lib', 'preview'))
 const verify = require(path.join(ROOT, 'lib', 'verify'))
 const mediaAI = require(path.join(ROOT, 'lib', 'media-ai'))
+const clipboard = require(path.join(ROOT, 'lib', 'clipboard'))
+const attachmentsLib = require(path.join(ROOT, 'lib', 'attachments'))
 const remindersLib = { parseReminder: null, parseNote: null }
 const intentLib = { parseIntent: null }
 
@@ -144,6 +146,7 @@ const state = {
   dragging: false,
   selAll: false,       // whole input line selected
   lastClick: { at: 0, y: -1 },
+  attachments: [],     // { kind, path, label } waiting to be sent with the next message
   lastAnswer: null,    // { ms, tokIn, tokOut, modelMs, at } for the bottom box
   asyncLast: null,
   tokens: { lastIn: 0, lastOut: 0, sessionIn: 0, sessionOut: 0, context: 0 },
@@ -673,9 +676,10 @@ function render() {
 
   // ---- input line
   const inputLabel = state.busy ? paint(C.amber, '\u2026 ') : paint(C.accent, '\u203a ')
-  let hint = state.busy ? paint(C.dimmer, 'esc stops') : paint(C.dimmer, '/help')
+  let hint = state.busy ? paint(C.dimmer, 'esc stops') : paint(C.dimmer, 'Ctrl+V paste · /attach · /help')
   if (scroll > 0) hint = paint(C.amber, '\u2191 ' + scroll + ' lines \u00b7 End for bottom')
   if (state.selAll) hint = paint(C.amber, 'all selected \u00b7 type to replace')
+  if (state.attachments.length) hint = paint(C.green, attachmentLabel() + ' \u00b7 /attach clear')
 
   // ---- compose
   const out = []
@@ -763,16 +767,28 @@ function render() {
 /* ------------------------------------------------------------- input line */
 const stdin = process.stdin
 
-function submit() {
+async function submit() {
+  if (state.busy) return
   const text = state.input.trim()
-  if (!text) return
+  if (!text && !state.attachments.length) return
   state.input = ''
   state.pos = 0
   state.selAll = false
-  if (state.history[state.history.length - 1] !== text) state.history.push(text)
+  if (text && state.history[state.history.length - 1] !== text) state.history.push(text)
   state.histAt = -1
-  handle(text)
   scheduleRender()
+  if (!state.attachments.length) return handle(text)
+  state.busy = true
+  state.status = 'reading attachments'
+  scheduleRender()
+  let body = ''
+  try { body = await attachmentBlocks() } catch (e) { body = 'attachment read failed: ' + (e && e.message ? e.message : e) }
+  state.busy = false
+  state.status = 'ready'
+  state.attachments = []
+  scheduleRender()
+  const ask = text || 'Read the attached material and summarise what matters.'
+  return handle(ask + (body ? '\n\n--- attached material ---\n' + body : ''))
 }
 
 /* A request that would act on the machine waits for an explicit yes. The guard
@@ -1127,6 +1143,9 @@ const HELP = [
   ['/watch <youtube url>', 'fetch captions and summarize the video'],
   ['/listen <audio|video> [model]', 'transcribe English speech locally and summarize'],
   ['/record [seconds]', 'record from microphone and transcribe'],
+  ['/attach [file|folder|shot|voice|list|clear]', 'attach image/audio/video/file/folder to the next message'],
+  ['/ss', 'screenshot the screen and attach it'],
+  ['/voice [seconds]', 'record the microphone and attach it'],
   ['/agents', 'list the agent registry: model, provider, status'],
   ['/agents run <name> <task>', 'send one task straight to one registered agent'],
   ['/cascade <task>', 'try agents in order until one answers (failover)'],
@@ -1204,7 +1223,9 @@ async function command(raw) {
 
   switch (cmd) {
     case 'help': case 'h': case '?':
-      for (const [c, d] of HELP) sys(pad(c, 34) + ' ' + d)
+      sys(paint(C.dimmer, 'keys   Shift+drag select · double-click word · triple-click block · right-click or Ctrl+C copy · Ctrl+X cut · Ctrl+V paste · Ctrl+A select line · Ctrl+U clear · PgUp/PgDn scroll'))
+      sys(paint(C.dimmer, 'files  drag a file into this window, or paste a path — it attaches. /attach opens a picker.'))
+      for (const [c, d] of HELP) sys(pad(c, 46) + ' ' + d)
       break
 
     case 'solve': {
@@ -2243,6 +2264,30 @@ async function command(raw) {
       break
     }
 
+    case 'attach': {
+      const what = String(arg || '').trim().toLowerCase()
+      if (!what) { await attachFiles(); break }
+      if (what === 'list') {
+        if (!state.attachments.length) sys(paint(C.dimmer, 'nothing attached'))
+        for (const a of state.attachments) sys(' ' + pad(a.kind, 7) + a.path)
+        break
+      }
+      if (what === 'clear' || what === 'off') {
+        state.attachments = []
+        sys(paint(C.green, '\u2713 attachments cleared'))
+        break
+      }
+      if (what === 'folder' || what === 'dir') { await attachFolder(); break }
+      if (what === 'shot' || what === 'ss' || what === 'screenshot') { await attachScreenshot(); break }
+      if (what === 'voice' || what.startsWith('voice ')) { await attachVoice(what.split(/\s+/)[1]); break }
+      if (what === 'paste' || what === 'clip' || what === 'clipboard') { await pasteClipboard(); break }
+      attachPath(arg) || sys(paint(C.dimmer, 'not found: ' + arg))
+      break
+    }
+
+    case 'ss': { await attachScreenshot(); break }
+    case 'voice': { await attachVoice(arg); break }
+
     case 'record': {
       const secs = Math.max(1, Math.min(300, Number(arg) || 5))
       const devices = await dshowAudio()
@@ -2304,29 +2349,152 @@ function scrollBy(n) {
   scheduleRender()
 }
 
-/* right click on a highlighted block -> clipboard */
-function copySelection() {
+/* ---- clipboard: copy · cut · paste ---------------------------------- */
+
+function selectionTextNow() {
   const sel = state.sel
-  if (!sel) return false
-  const text = SCR ? SCR.selectionText(state.screen, sel) : ''
-  if (!text.trim()) return false
-  try {
-    const tmp = path.join(os.tmpdir(), 'jarvis-clip-' + process.pid + '.txt')
-    fs.writeFileSync(tmp, text, 'utf8')
-    execFile('powershell', ['-NoProfile', '-Command',
-      "Get-Content -Raw -LiteralPath '" + tmp + "' | Set-Clipboard"],
-      { windowsHide: true, timeout: 8000 }, () => {
-        try { fs.unlinkSync(tmp) } catch {}
-      })
-    sys(paint(C.green, '\u2713 copied ' + text.length + ' chars \u2014 right click again to copy another block'))
-  } catch (e) {
-    sys('copy failed: ' + (e && e.message ? e.message : e))
+  if (sel) {
+    const text = SCR ? SCR.selectionText(state.screen, sel) : ''
+    if (text.trim()) return { text, what: 'selection' }
+  }
+  if (state.selAll && state.input) return { text: state.input, what: 'input line' }
+  return null
+}
+
+/* right click, Ctrl+C or Ctrl+Shift+C: put the highlighted text on the clipboard */
+async function copySelection(silent) {
+  const got = selectionTextNow()
+  if (!got) {
+    if (!silent) { sys(paint(C.dimmer, 'nothing selected \u2014 drag over text, double-click a word, or Ctrl+A')); scheduleRender() }
+    return false
+  }
+  const ok = await clipboard.writeText(got.text)
+  if (!silent) sys(paint(ok ? C.green : C.red, (ok ? '\u2713 copied ' : '\u2717 copy failed ') + got.text.length + ' chars from ' + got.what))
+  scheduleRender()
+  return ok
+}
+
+/* Ctrl+X: move the writing box to the clipboard and clear it */
+async function cutInput() {
+  if (!state.input) { sys(paint(C.dimmer, 'the writing box is empty')); return scheduleRender() }
+  const n = state.input.length
+  const ok = await clipboard.writeText(state.input)
+  state.input = ''
+  state.pos = 0
+  state.selAll = false
+  sys(paint(ok ? C.green : C.red, (ok ? '\u2713 cut ' : '\u2717 cut, clipboard failed: ') + n + ' chars'))
+  scheduleRender()
+}
+
+/* Ctrl+V: paste text, or attach the files copied in Explorer */
+async function pasteClipboard() {
+  const files = await clipboard.readFiles()
+  if (files.length) { for (const f of files) attachPath(f); return }
+  const text = await clipboard.readText()
+  if (!text) { sys(paint(C.dimmer, 'clipboard is empty')); return scheduleRender() }
+  if (attachPathsFromText(text)) return
+  insertText(SCR ? SCR.pasteLine(text) : String(text).replace(/\s+/g, ' ').trim())
+}
+
+/* ---- attachments ---------------------------------------------------- */
+
+function kindOf(file) {
+  return attachmentsLib.kindOf(file)
+}
+
+function attachPath(raw) {
+  const p = attachmentsLib.normalize(raw)
+  if (!p) return false
+  const kind = attachmentsLib.kindOf(p)
+  if (!kind) return false
+  if (!state.attachments.some((a) => a.path === p)) {
+    state.attachments.push({ kind, path: p, label: path.basename(p) || p })
+    sys(paint(C.green, '\ud83d\udcce ' + kind + ' \u00b7 ' + p))
   }
   scheduleRender()
   return true
 }
 
-/* double click selects the whole entry under the pointer */
+/* A dragged-and-dropped file arrives as pasted text: one path per line. */
+function attachPathsFromText(text) {
+  const found = attachmentsLib.fromText(text)
+  if (!found.length) return false
+  for (const a of found) attachPath(a.path)
+  return true
+}
+
+async function attachFiles() {
+  const picked = await clipboard.pickFiles()
+  if (!picked.length) { sys(paint(C.dimmer, 'no file picked')); return scheduleRender() }
+  for (const p of picked) attachPath(p)
+}
+
+async function attachFolder() {
+  const picked = await clipboard.pickFolder()
+  if (!picked) { sys(paint(C.dimmer, 'no folder picked')); return scheduleRender() }
+  attachPath(picked)
+}
+
+async function attachScreenshot() {
+  const dir = path.join(ROOT, 'data', 'previews')
+  try { fs.mkdirSync(dir, { recursive: true }) } catch (e) { /* exists */ }
+  const file = path.join(dir, 'attach-' + Date.now() + '.png')
+  const cmd = 'Add-Type -AssemblyName System.Windows.Forms,System.Drawing; ' +
+    '$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; ' +
+    '$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; ' +
+    '$g=[System.Drawing.Graphics]::FromImage($bmp); ' +
+    '$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); ' +
+    "$bmp.Save('" + file.replace(/'/g, "''") + "'); $g.Dispose(); $bmp.Dispose(); 'ok'"
+  await new Promise((res) => execFile('powershell', ['-NoProfile', '-Command', cmd], { windowsHide: true, timeout: 20000 }, () => res()))
+  if (!fs.existsSync(file)) { sys(paint(C.red, '\u2717 screenshot failed')); return scheduleRender() }
+  attachPath(file)
+}
+
+async function attachVoice(secs) {
+  const n = Math.max(1, Math.min(300, Number(secs) || 10))
+  const devices = await dshowAudio()
+  const mic = process.env.JARVIS_MIC || devices[0] || ''
+  if (!mic) { sys(paint(C.red, '\u2717 no microphone found')); return scheduleRender() }
+  const file = path.join(os.tmpdir(), 'jarvis-voice-' + Date.now() + '.wav')
+  sys(paint(C.dimmer, '\ud83c\udf99 recording ' + n + 's from ' + mic + '\u2026'))
+  scheduleRender()
+  await new Promise((res) => {
+    const proc = spawn('ffmpeg', ['-y', '-f', 'dshow', '-i', 'audio=' + mic, '-t', String(n),
+      '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', file],
+      { windowsHide: true, timeout: (n + 10) * 1000 })
+    proc.on('close', () => res())
+    proc.on('error', () => res())
+  })
+  if (!fs.existsSync(file)) { sys(paint(C.red, '\u2717 recording failed')); return scheduleRender() }
+  attachPath(file)
+}
+
+function attachmentLabel() {
+  const s = attachmentsLib.summary(state.attachments)
+  return s ? '\ud83d\udcce ' + s : ''
+}
+
+/* Attachments become text the model can use: images through the vision path,
+ * audio/video through faster-whisper, text files inlined, folders listed. */
+async function attachmentBlocks() {
+  for (const a of state.attachments) {
+    if (a.text) continue
+    sys(paint(C.dimmer, 'reading ' + a.kind + ' ' + a.label + '\u2026 (up to 90s, then it moves on)'))
+    scheduleRender()
+  }
+  return attachmentsLib.buildBlocks(state.attachments, mediaAI, { timeoutMs: 90000 })
+}
+
+/* double click selects one word; triple click selects the whole entry */
+function selectWordAt(row, col) {
+  const line = state.screen[row - 1] || ''
+  const b = SCR ? SCR.wordBounds(line, col) : null
+  if (!b) return false
+  state.sel = { r1: row, c1: b.c1, r2: row, c2: b.c2 }
+  scheduleRender()
+  return true
+}
+
 function selectBlockAt(row) {
   const src = state.rowSrc && state.rowSrc[row - 1]
   if (src == null || src < 0) return false
@@ -2348,9 +2516,11 @@ function onMouse(ev) {
   if (b === 'wheeldown') return scrollBy(-3)
   if (b === 'left') {
     const now = Date.now()
-    const dbl = now - state.lastClick.at < 400 && state.lastClick.y === ev.y
-    state.lastClick = { at: now, y: ev.y }
-    if (dbl && selectBlockAt(ev.y)) return
+    const near = now - state.lastClick.at < 450 && state.lastClick.y === ev.y
+    const count = near ? (state.lastClick.count || 1) + 1 : 1
+    state.lastClick = { at: now, y: ev.y, count }
+    if (count === 2 && selectWordAt(ev.y, ev.x)) return
+    if (count >= 3 && selectBlockAt(ev.y)) return
     state.dragging = true
     state.sel = { r1: ev.y, c1: ev.x, r2: ev.y, c2: ev.x }
     return scheduleRender()
@@ -2383,9 +2553,14 @@ function onEvent(ev) {
 
   if (t === 'ctrl') {
     if (ev.key === 'c') {
+      /* Ctrl+C copies when something is highlighted, otherwise it stops/leaves —
+       * the same rule editors use, so a copy can never kill a running answer. */
+      if (selectionTextNow()) { copySelection(); return }
       if (state.busy) { bridge.cancel(); state.busy = false; state.status = 'ready'; sys('stopped'); return scheduleRender() }
       return quit()
     }
+    if (ev.key === 'x') return cutInput()
+    if (ev.key === 'v') return pasteClipboard()
     if (ev.key === 'l') { process.stdout.write('\x1b[2J'); return scheduleRender() }
     if (ev.key === 'a') { state.selAll = !!state.input.length; return scheduleRender() }
     if (ev.key === 'e') { state.pos = state.input.length; state.selAll = false; return scheduleRender() }
@@ -2446,6 +2621,8 @@ function onEvent(ev) {
 
   if (t === 'text') return insertText(ev.value)
   if (t === 'paste') {
+    /* Dragging files into the window, or pasting paths, attaches them. */
+    if (attachPathsFromText(ev.value)) return
     const one = SCR ? SCR.pasteLine(ev.value) : String(ev.value).replace(/\s+/g, ' ').trim()
     return insertText(one)
   }
