@@ -21,7 +21,7 @@ if (sessAt > -1 && process.argv[sessAt + 1]) {
 const os = require('os')
 const fs = require('fs')
 const path = require('path')
-const { execFile } = require('child_process')
+const { execFile, spawn } = require('child_process')
 const readline = require('readline')
 
 const ROOT = path.join(__dirname, '..')
@@ -1110,6 +1110,7 @@ const HELP = [
   ['/see <image> [question]', 'describe any image file (screenshot, photo, diagram)'],
   ['/watch <youtube url>', 'fetch captions and summarize the video'],
   ['/listen <audio|video> [model]', 'transcribe English speech locally and summarize'],
+  ['/record [seconds]', 'record from microphone and transcribe'],
   ['/agents', 'list the agent registry: model, provider, status'],
   ['/agents run <name> <task>', 'send one task straight to one registered agent'],
   ['/cascade <task>', 'try agents in order until one answers (failover)'],
@@ -2223,6 +2224,28 @@ async function command(raw) {
       const res = await bridge.ask(prompt)
       if (res.ok) { jarvis(res.text); sys(paint(C.dimmer, '· ' + (res.model || 'model') + (res.secs ? ' ' + res.secs + 's' : ''))) }
       else sys(paint(C.red, '✗ ' + (res.text || 'summary failed')))
+      break
+    }
+
+    case 'record': {
+      const secs = Math.max(1, Math.min(300, Number(arg) || 5))
+      const mic = 'default'
+      const wavPath = path.join(os.tmpdir(), 'jarvis-record-' + Date.now() + '.wav')
+      sys(paint(C.dimmer, 'recording ' + secs + 's from microphone…'))
+      scheduleRender()
+      await new Promise((resolve, reject) => {
+        const proc = spawn('ffmpeg', ['-y', '-f', 'dshow', '-i', 'audio=' + mic, '-t', String(secs), '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', wavPath],
+          { timeout: (secs + 10) * 1000, windowsHide: true, env: Object.assign({}, process.env) })
+        proc.on('close', (code) => code === 0 ? resolve() : reject(new Error('ffmpeg failed')))
+        proc.on('error', reject)
+      })
+      sys(paint(C.dimmer, 'transcribing…'))
+      scheduleRender()
+      const t = await mediaAI.transcribe(wavPath, 'tiny')
+      try { fs.unlinkSync(wavPath) } catch {}
+      if (!t.ok) { sys(paint(C.red, '✗ ' + t.error)); break }
+      jarvis(t.text)
+      sys(paint(C.dimmer, '· ' + t.chars + ' chars · ' + t.duration + 's audio'))
       break
     }
 
