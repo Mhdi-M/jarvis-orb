@@ -43,6 +43,17 @@ const messagesLib = require(path.join(ROOT, 'lib', 'messages'))
 const chromeLib = require(path.join(ROOT, 'lib', 'chrome'))
 const skillsLib = require(path.join(ROOT, 'lib', 'skills'))
 const profileLib = require(path.join(ROOT, 'lib', 'profile'))
+const health = require(path.join(ROOT, 'lib', 'health'))
+const models = require(path.join(ROOT, 'lib', 'models'))
+const alerts = require(path.join(ROOT, 'lib', 'alerts'))
+const quality = require(path.join(ROOT, 'lib', 'quality'))
+const securityLib = require(path.join(ROOT, 'lib', 'security'))
+const sentinel = require(path.join(ROOT, 'lib', 'sentinel'))
+const reflect = require(path.join(ROOT, 'lib', 'reflect'))
+const visionbench = require(path.join(ROOT, 'lib', 'visionbench'))
+const papers = require(path.join(ROOT, 'lib', 'papers'))
+const guard = require(path.join(ROOT, 'lib', 'guard'))
+const orchestra = require(path.join(ROOT, 'lib', 'orchestra'))
 const remindersLib = { parseReminder: null, parseNote: null }
 const intentLib = { parseIntent: null }
 
@@ -144,6 +155,11 @@ const state = {
   trace: true,        // show the thinking block
   showTiming: true,   // show per-step timings inside it
   thinking: null,     // lines of the current thinking block
+  perf: { score: 0, label: 'unknown', parts: {} },
+  sec: { gateway: false, audit: 0 },
+  pendingAction: null, // a risky request waiting for /yes
+  agentNow: null,      // which specialist is working right now
+  orchestrate: true,   // route specialist tasks through the manager loop
 }
 
 /* --------------------------------------------------------------- messages */
@@ -328,6 +344,15 @@ function refreshHw() {
   state.hw.diskTemp = hwCache.diskTemp
   state.hw.diskFree = d.free
   state.hw.diskTotal = d.total
+  try {
+    state.perf = health.performance({ contextTokens: state.tokens.context })
+  } catch {}
+}
+
+/* Performance + security line for the sidebar, refreshed off the paint path. */
+function refreshStatus() {
+  try { state.perf = health.performance({ contextTokens: state.tokens.context }) } catch {}
+  try { state.sec = { gateway: gateway.status().running, audit: securityLib.recentAudit(1000).length } } catch {}
 }
 
 let tempPollTimer = null
@@ -551,7 +576,7 @@ function render() {
   side.push(' ' + paint(C.bright, cut(state.model, sideW - 3)))
   side.push(' ' + paint(C.dimmer, 'PROVIDER ') + paint(C.steel, cut(state.provider, sideW - 13)))
   const elapsed = state.busy && state.busySince ? ((Date.now() - state.busySince) / 1000).toFixed(1) + 's' : ''
-  side.push(' ' + paint(C.dimmer, 'AGENT    ') + paint(state.busy ? C.amber : C.green, state.busy ? 'working ' + elapsed : 'idle'))
+  side.push(' ' + paint(C.dimmer, 'AGENT    ') + paint(state.busy ? C.amber : C.green, state.busy ? (state.agentNow ? '→ ' + String(state.agentNow).slice(0, 14) : 'working ' + elapsed) : 'idle'))
   side.push(' ' + paint(C.dimmer, 'SESSION  ') + paint(C.steel, cut(state.session, sideW - 13)))
   side.push(rule)
   side.push(' ' + paint(C.dimmer, 'TOKENS'))
@@ -572,6 +597,20 @@ function render() {
   if (state.hw.diskTemp != null) side.push(' ' + paint(C.dimmer, 'SSD ') + paint(C.steel, Math.round(state.hw.diskTemp) + '\u00b0C'))
   const diskUsed = state.hw.diskTotal ? 100 * (1 - state.hw.diskFree / state.hw.diskTotal) : 0
   side.push(' ' + paint(C.dimmer, 'DISK') + ' ' + paint(C.steel, diskUsed ? Math.round(diskUsed) + '% used' : '\u2014'))
+  side.push(rule)
+  /* AI PERFORMANCE: measured from model/agent outcomes, not invented */
+  const perf = state.perf || {}
+  const pScore = Number.isFinite(perf.score) ? perf.score : 0
+  const pLabel = perf.label || 'unknown'
+  side.push(' ' + paint(C.dimmer, 'PERFORMANCE'))
+  side.push(' ' + paint(C.dimmer, 'AI ') + bar(pScore, 10) + ' ' + paint(C.steel, pScore + '%') + ' ' + paint(pLabel === 'healthy' ? C.green : pLabel === 'steady' ? C.steel : pLabel === 'strained' ? C.amber : pLabel === 'no data' ? C.dimmer : C.red, pLabel))
+  const h = health.load()
+  const modelRows = Object.values(h.models || {})
+  const modelsOk = modelRows.filter((m) => m.lastOk && (!m.lastFail || m.lastOk >= m.lastFail)).length
+  const agentRows = Object.values(h.agents || {})
+  const agentsOk = agentRows.filter((a) => a.lastOk && (!a.lastFail || a.lastOk >= a.lastFail)).length
+  side.push(' ' + paint(C.dimmer, 'llm ') + paint(C.steel, modelsOk + '/' + modelRows.length) + paint(C.dimmer, ' · agents ') + paint(C.steel, agentsOk + '/' + agentRows.length))
+  side.push(' ' + paint(C.dimmer, 'SEC ') + paint(C.steel, 'gw ' + (state.sec.gateway ? 'on' : 'off') + ' · audit ' + state.sec.audit))
   side.push(rule)
   const rem = readList(REMINDER_FILE).filter((r) => r.at > Date.now()).length
   kv('reminders', String(rem))
@@ -716,8 +755,42 @@ function submit() {
   scheduleRender()
 }
 
-async function handle(text) {
+/* A request that would act on the machine waits for an explicit yes. The guard
+ * is a policy, not a sandbox: it stops requests made through Jarvis's own input
+ * path, and records what was held, approved or refused. */
+async function approvePending(ok) {
+  const t = state.pendingAction
+  state.pendingAction = null
+  if (!t) { sys(paint(C.dimmer, 'nothing is waiting for approval')); return scheduleRender() }
+  if (!ok) {
+    securityLib.audit({ area: 'permission', action: 'denied', request: t })
+    sys(paint(C.dimmer, '✗ cancelled'))
+    return scheduleRender()
+  }
+  securityLib.audit({ area: 'permission', action: 'approved', request: t })
+  sys(paint(C.green, '✓ approved'))
+  return handle(t, { approved: true })
+}
+
+async function handle(text, opts = {}) {
   if (text.startsWith('/')) return command(text)
+  if (!opts.approved) {
+    if (state.pendingAction && /^(yes|y|approve|ok|do it)\b/i.test(text.trim())) return approvePending(true)
+    if (state.pendingAction && /^(no|n|cancel|stop)\b/i.test(text.trim())) return approvePending(false)
+    const risk = securityLib.risk(text)
+    if (risk.needsApproval && risk.level !== 'none') {
+      state.pendingAction = text
+      securityLib.audit({ area: 'permission', action: 'held', request: text, level: risk.level, reasons: risk.reasons })
+      sys(paint(C.amber, '⚠ this needs your approval: ' + risk.reasons.join('; ')))
+      if (!INTERACTIVE && process.env.JARVIS_ALLOW_RISKY !== '1') {
+        state.pendingAction = null
+        sys(paint(C.dimmer, 'one-shot mode refuses risky actions (set JARVIS_ALLOW_RISKY=1 to allow).'))
+        return scheduleRender()
+      }
+      sys(paint(C.dimmer, 'type /yes to run it, /no to cancel'))
+      return scheduleRender()
+    }
+  }
   // local intents first
   const intent = intentLib.parseIntent ? intentLib.parseIntent(text) : null
   if (intent) { you(text); return runIntent(intent) }
@@ -736,7 +809,63 @@ async function handle(text) {
     return scheduleRender()
   }
   you(text)
+  if (state.orchestrate && orchestra.shouldOrchestrate(text)) return askOrchestra(text)
   await askAgent(text)
+}
+
+/* The manager loop: plan → dispatch in parallel → validate → retry → merge.
+ * Every step is a dim think line under the question, and the sidebar names the
+ * agent that is working right now. A result that fails validation is never
+ * printed as an answer. */
+async function askOrchestra(text) {
+  state.busy = true
+  state.busySince = Date.now()
+  state.status = 'orchestrating'
+  state.agentNow = 'manager'
+  const t0 = Date.now()
+  const mark2 = (m) => {
+    if (!state.trace) return
+    addLine('think', m + (state.showTiming ? '  +' + ((Date.now() - t0) / 1000).toFixed(1) + 's' : ''))
+    scheduleRender()
+  }
+  mark2('manager · planning')
+  scheduleRender()
+  try {
+    const r = await orchestra.solve(text, {
+      onTrace: (e) => {
+        if (e.agent) state.agentNow = e.agent
+        const who = e.agent ? String(e.agent) + ' ' : ''
+        const t = String(e.text == null ? '' : e.text).slice(0, 90)
+        if (e.phase === 'dispatch') mark2('→ ' + who + '· ' + t)
+        else if (e.phase === 'agent') mark2((e.ok ? '✓ ' : '✗ ') + who + t + (e.secs != null ? ' ' + e.secs + 's' : ''))
+        else if (e.phase === 'validate') mark2((e.ok ? '✓ ' : '✗ ') + 'validate ' + who + t)
+        else if (e.phase === 'retry') mark2('↻ ' + who + t)
+        else if (e.phase === 'round') mark2('· round ' + e.round + ' · ' + t)
+        else if (e.phase === 'merge') mark2('· ' + who + t)
+        else if (e.phase === 'answer') mark2((e.ok ? '✓ ' : '✗ ') + 'answer · ' + t)
+        else if (e.phase === 'plan') mark2('· plan ' + t)
+        else if (e.phase === 'start') mark2('· ' + t)
+        scheduleRender()
+      },
+    })
+    if (r.ok) {
+      jarvis(r.answer)
+      state.lastAnswer = { ms: Date.now() - t0, tokIn: 0, tokOut: 0, modelMs: 0, at: Date.now() }
+    } else {
+      sys(paint(C.amber, '⚠ no validated answer — ' + r.reason))
+      sys(paint(C.dimmer, 'the result was rejected, so it is not being shown as an answer. /reflect shows what the agents have been doing.'))
+      alerts.raise('unavailable', 'orchestra rejected every result: ' + r.reason, {})
+    }
+    try { state.perf = health.performance({ contextTokens: state.tokens.context }) } catch {}
+  } catch (e) {
+    sys('✗ ' + (e && e.message ? e.message : String(e)))
+  } finally {
+    state.busy = false
+    state.busySince = 0
+    state.agentNow = null
+    state.status = 'ready'
+    scheduleRender()
+  }
 }
 
 async function askAgent(text) {
@@ -755,6 +884,10 @@ async function askAgent(text) {
     scheduleRender()
   }
   mark('asking ' + state.model)
+  try {
+    const c = bridge.pickChoice()
+    if (c && c.model) { state.model = c.model; state.provider = c.provider }
+  } catch {}
   scheduleRender()
   let first = true
   try {
@@ -797,6 +930,17 @@ async function askAgent(text) {
         for (const f of facts) sys(paint(C.violet, 'learned: ') + f)
         scheduleRender()
       },
+      onSwitch: (next, why) => {
+        state.model = next.model
+        state.provider = next.provider
+        sys(paint(C.violet, '↻ switched to ' + next.model + ' — ' + why.plain))
+        scheduleRender()
+      },
+      onNotice: (kind, detail) => {
+        sys(paint(C.amber, '⚠ ' + detail))
+        alerts.raise(kind, detail, {})
+        scheduleRender()
+      },
       onMeta: (m) => {
         if (state.trace) {
           if (m.tokens) mark('tokens ' + m.tokens.input + ' in / ' + m.tokens.output + ' out')
@@ -824,6 +968,19 @@ async function askAgent(text) {
     } else if (res.text) {
       jarvis(res.text)
     }
+
+    /* Nothing junk reaches the transcript as an answer: an error page, a stack
+     * trace, an echo or an empty reply becomes one plain sentence + a toast. */
+    const verdict = res.stopped ? { ok: true } : res.ok ? quality.assess(res.text) : { ok: false, kind: health.classifyFailure(res.text).kind }
+    if (!verdict.ok) {
+      const d = quality.describeFailure(res.text, verdict.kind)
+      const lastLine = state.lines[state.lines.length - 1]
+      if (lastLine && lastLine.role === 'jarvis') { lastLine.role = 'sys'; lastLine.text = '⚠ ' + d.headline }
+      else sys(paint(C.amber, '⚠ ' + d.headline))
+      if (d.detail) sys(paint(C.dimmer, d.detail))
+      const limited = verdict.kind === 'rate_limit' || verdict.kind === 'context' || verdict.kind === 'overloaded'
+      alerts.raise(limited ? 'limited' : 'unavailable', (state.model || 'model') + ' — ' + d.headline.replace(/^No answer — /, ''), {})
+    }
   } catch (e) {
     sys('✗ ' + (e && e.message ? e.message : String(e)))
     mark('failed: ' + (e && e.message ? e.message : String(e)))
@@ -841,6 +998,7 @@ async function askAgent(text) {
     state.busy = false
     state.busySince = 0
     state.status = 'ready'
+    try { state.perf = health.performance({ contextTokens: state.tokens.context }) } catch {}
     scheduleRender()
   }
 }
@@ -937,9 +1095,22 @@ const HELP = [
   ['/agents', 'list the agent registry: model, provider, status'],
   ['/agents run <name> <task>', 'send one task straight to one registered agent'],
   ['/cascade <task>', 'try agents in order until one answers (failover)'],
+  ['/solve <task>', 'manager loop: plan, parallel agents, validate, retry, merge'],
+  ['/orchestra [on|off]', 'route specialist questions through the manager loop'],
   ['/ui list|click|type', 'accessibility-first control of desktop apps'],
   ['/graph [open]', 'render the agent brain network to data/graph.html'],
-  ['/serve [on|stop|token]', 'local gateway: /status /ask /bg for any client'],
+  ['/serve [on|stop|pair|approve|passwd]', 'local gateway: /status /ask /bg · one-time pairing codes'],
+  ['/models [refresh|all|use|on|off]', 'every reachable LLM, ranked by measured health · local included'],
+  ['/perf', 'AI performance score and the four parts behind it'],
+  ['/auto [on|off]', 'switch model automatically on a limit or failure'],
+  ['/heal', 'probe the current model; switch if it is down'],
+  ['/alerts [on|off|test|recent]', 'desktop notifications for limits and failures'],
+  ['/reflect [reset]', 'distil past runs into routing preferences'],
+  ['/paper <check|run|env> [dir] [template]', 'drive paper-orchestra (LaTeX paper writer)'],
+  ['/visionbench [element] [trials]', 'measure vision coordinates against UIA ground truth'],
+  ['/security [status|scan|baseline|audit]', 'self-check, change monitor, audit log'],
+  ['/yes · /no', 'approve or cancel a request the guard is holding'],
+  ['/quit', 'leave'],
   ['/bg <task>', 'run a task in the background, no window, toast on finish'],
   ['/bg list|log <id>|kill <id>', 'manage background jobs'],
   ['/browse <url>', 'open a page in your own Chrome (CDP, no bundled browser)'],
@@ -997,6 +1168,193 @@ async function command(raw) {
     case 'help': case 'h': case '?':
       for (const [c, d] of HELP) sys(pad(c, 34) + ' ' + d)
       break
+
+    case 'solve': {
+      const t = String(arg || '').trim()
+      if (!t) { sys(paint(C.dimmer, 'usage: /solve <task>   (manager plans, agents run in parallel, results are validated)')); break }
+      return askOrchestra(t)
+    }
+
+    case 'orchestra': {
+      const v = String(arg || '').trim().toLowerCase()
+      if (v === 'on' || v === 'off') state.orchestrate = v === 'on'
+      sys(paint(C.dimmer, 'manager loop is ' + (state.orchestrate ? 'on for vision/calc/search/shell tasks' : 'off — /ask goes straight to one model')))
+      break
+    }
+
+    case 'yes': case 'approve':
+      return approvePending(true)
+
+    case 'no': case 'cancel':
+      return approvePending(false)
+
+    case 'models': {
+      const v = String(arg || '').trim()
+      if (v === 'refresh' || v === 'all') {
+        sys(paint(C.dimmer, 'probing the inventory — one small question per model...'))
+        scheduleRender()
+        const steps = []
+        await models.refresh({ all: v === 'all', onStep: (s) => {
+          sys(pad(s.id, 14) + (s.ok ? paint(C.green, 'ok  ') : paint(C.red, 'fail')) + ' ' + (s.secs != null ? s.secs + 's' : '') + '  ' + String(s.text || '').slice(0, 60))
+          scheduleRender()
+        } })
+        sys(paint(C.dimmer, 'done · ' + models.status().length + ' usable'))
+        break
+      }
+      if (v.startsWith('use ')) {
+        const id = v.slice(4).trim()
+        const reg = models.load()
+        const e = (reg.models || []).find((x) => x.id === id || x.model === id)
+        if (!e) { sys(paint(C.red, 'no model with id ' + id)); break }
+        config.model = e.model; config.provider = e.provider; saveConfig()
+        bridge.settings.model = e.model; bridge.settings.provider = e.provider
+        state.model = e.model; state.provider = e.provider
+        securityLib.audit({ area: 'model', action: 'select', model: e.model, provider: e.provider })
+        sys(paint(C.green, '→ ' + e.model + ' (' + e.provider + ')'))
+        break
+      }
+      if (v.startsWith('on ') || v.startsWith('off ')) {
+        const id = v.slice(3).trim()
+        const ok = models.setEnabled(id, v.startsWith('on '))
+        sys(paint(C.dimmer, ok ? id + (v.startsWith('on ') ? ' enabled' : ' disabled') : 'no model ' + id))
+        break
+      }
+      const rows = models.status({ all: true })
+      for (const r of rows) {
+        const state2 = r.usable ? (r.cooling ? paint(C.amber, 'cooling') : r.status === 'ok' ? paint(C.green, 'ok') : r.attempts ? paint(C.red, r.status) : paint(C.dimmer, 'untested')) : paint(C.dimmer, 'no key')
+        sys(pad(r.id, 18) + pad(r.model, 30) + pad(String(Math.round(r.score * 100)), 5) + pad(r.secs != null ? r.secs + 's' : '—', 7) + state2 + (r.local ? paint(C.violet, ' local') : ''))
+      }
+      sys(paint(C.dimmer, '/models refresh | all | use <id> | on|off <id>'))
+      break
+    }
+
+    case 'perf': {
+      const p = health.performance({ contextTokens: state.tokens.context })
+      const pct = (n) => Math.round(n * 100) + '%'
+      sys(paint(C.dimmer, 'AI PERFORMANCE'))
+      sys(' ' + bar(p.score, 14) + ' ' + paint(C.bright, p.score + '%') + ' ' + paint(C.steel, p.label))
+      sys(paint(C.dimmer, 'availability ') + pad(pct(p.parts.availability), 6) + paint(C.dimmer, 'reliability ') + pad(pct(p.parts.reliability), 6) + paint(C.dimmer, 'speed ') + pad(pct(p.parts.speed), 6) + paint(C.dimmer, 'context headroom ') + pct(p.parts.headroom))
+      sys(paint(C.dimmer, 'median ' + (p.medianSecs != null ? p.medianSecs + 's' : '—') + ' · ' + p.attempts + ' recorded attempt(s)'))
+      const last = health.lastFailure()
+      if (last) sys(paint(C.amber, 'last failure: ' + (last.key || last.agent) + ' · ' + (last.status || 'failed')))
+      break
+    }
+
+    case 'auto': {
+      const v = String(arg || '').trim().toLowerCase()
+      if (v === 'on' || v === 'off') bridge.settings.autoSwitch = v === 'on'
+      sys(paint(C.dimmer, 'auto-switch is ' + (bridge.settings.autoSwitch ? 'on' : 'off') + ' · /auto on|off'))
+      break
+    }
+
+    case 'heal': {
+      sys(paint(C.dimmer, 'probing the current model...'))
+      scheduleRender()
+      const r = await bridge.selfCheck()
+      if (r.ok) { sys(paint(C.green, '✓ ' + r.model + ' answered in ' + r.secs + 's')); break }
+      sys(paint(C.red, '✗ ' + r.model + ' failed: ' + (r.text || r.error || 'no answer')))
+      const next = models.best([r.model])
+      if (next) {
+        config.model = next.model; config.provider = next.provider; saveConfig()
+        bridge.settings.model = next.model; bridge.settings.provider = next.provider
+        state.model = next.model; state.provider = next.provider
+        alerts.raise('switched', 'moved to ' + next.model, {})
+        sys(paint(C.violet, '↻ switched to ' + next.model + ' for new turns'))
+      } else sys(paint(C.amber, 'no other model is usable — check keys with /models'))
+      break
+    }
+
+    case 'alerts': {
+      const v = String(arg || '').trim().toLowerCase()
+      if (v === 'off') { process.env.JARVIS_ALERTS = 'off'; sys(paint(C.dimmer, 'desktop alerts off')) }
+      else if (v === 'on') { delete process.env.JARVIS_ALERTS; sys(paint(C.dimmer, 'desktop alerts on')) }
+      else if (v === 'test') { const t = alerts.test(); sys(paint(C.dimmer, t.toasted ? 'test notification sent' : 'notification attempted (toast may be blocked)')) }
+      else if (v === 'recent') {
+        for (const a of alerts.recent(8)) sys(paint(C.dimmer, new Date(a.at).toTimeString().slice(0, 5) + '  ' + a.kind + '  ' + String(a.message || '').slice(0, 70)))
+      } else sys(paint(C.dimmer, 'alerts ' + (alerts.enabled() ? 'on' : 'off') + ' · /alerts on|off|test|recent'))
+      break
+    }
+
+    case 'reflect': {
+      if (String(arg || '').trim() === 'reset') { reflect.reset(); sys(paint(C.dimmer, 'preferences cleared')); break }
+      const p = reflect.run()
+      sys(paint(C.violet, 'reflected on ' + p.runs + ' run(s)'))
+      for (const r of p.rules) sys(paint(C.steel, '· ' + r))
+      for (const a of p.agents.slice(0, 6)) sys(pad(a.name, 12) + pad(a.rate + '%', 6) + pad('n=' + a.n, 6) + (a.secs ? a.secs + 's' : '') + '  ' + a.verdict)
+      for (const m of p.models.slice(0, 6)) sys(pad(m.key.split('/').pop(), 28) + pad(m.rate + '%', 6) + (m.secs ? m.secs + 's' : '') + '  ' + m.verdict)
+      sys(paint(C.dimmer, 'saved to ' + reflect.FILE + ' · injected into agent prompts'))
+      break
+    }
+
+    case 'paper': {
+      const parts = String(arg || '').trim().split(/\s+/)
+      const sub = parts[0] || 'check'
+      if (sub === 'env') {
+        const e = papers.ensureEnv()
+        sys(paint(C.dimmer, 'env written to ' + e.file + ' · gemini ' + (e.gemini ? 'yes' : 'no') + ' · openai ' + (e.openai ? 'yes' : 'no')))
+        break
+      }
+      const materials = parts[1] || ''
+      const template = parts[2] || 'iclr2025'
+      const pre = papers.preflight({ materials })
+      for (const c of pre.checks) sys((c.ok ? paint(C.green, '✓ ') : paint(C.red, '✗ ')) + pad(c.name, 18) + paint(C.dimmer, String(c.detail).slice(0, 60)))
+      if (sub === 'check' || !materials) break
+      if (!pre.ok) { sys(paint(C.red, 'preflight failed — fix the ✗ rows first')); break }
+      sys(paint(C.dimmer, 'starting paper-orchestra · template ' + template + ' · log streams below'))
+      scheduleRender()
+      let n = 0
+      const res = await papers.run({ materials, template }, (line) => {
+        if (n++ < 300) { sys(line.slice(0, 130)); scheduleRender() }
+      })
+      sys(res.ok ? paint(C.green, '✓ paper finished → ' + res.output) : paint(C.red, '✗ paper failed (code ' + res.code + ')'))
+      break
+    }
+
+    case 'visionbench': {
+      const trials = Math.max(1, Math.min(6, Number(arg) || 3))
+      sys(paint(C.dimmer, 'measuring vision coordinates against UIA · ' + trials + ' trial(s)...'))
+      scheduleRender()
+      const r = await visionbench.measure({ trials, onTrial: (t) => {
+        sys(paint(C.dimmer, 'trial ' + t.trial + ' · ' + (t.ok ? Math.round(t.dist) + 'px off · ' + (t.inside ? 'hit' : 'miss') : t.error)))
+        scheduleRender()
+      } })
+      if (!r.ok) { sys(paint(C.red, '✗ ' + r.error)); break }
+      const s = r.summary
+      sys(paint(C.bright, 'hit ' + s.hits + '/' + s.trials + ' (' + s.hitRate + '%) · median ' + s.medianPx + 'px · max ' + s.maxPx + 'px · avg ' + s.avgSecs + 's'))
+      sys(paint(C.dimmer, 'element: ' + r.element + ' · saved to data/vision-accuracy.json'))
+      visionbench.save(r)
+      break
+    }
+
+    case 'security': {
+      const v = String(arg || '').trim().split(/\s+/)[0] || 'status'
+      if (v === 'audit') {
+        const n = Number(String(arg || '').split(/\s+/)[1]) || 15
+        for (const a of securityLib.recentAudit(n)) sys(paint(C.dimmer, String(a.at || '').slice(11, 19) + '  ' + pad(String(a.area || ''), 9) + String(a.action || '') + ' ' + String(a.request || a.detail || a.path || '').slice(0, 60)))
+        break
+      }
+      if (v === 'scan' || v === 'baseline') {
+        sys(paint(C.dimmer, v === 'baseline' ? 'scanning and replacing the baseline...' : 'scanning the machine...'))
+        scheduleRender()
+        const r = await sentinel.check({ setBase: v === 'baseline' })
+        if (!r.ok) { sys(paint(C.red, '✗ scan failed: ' + r.error)); break }
+        if (v === 'baseline') { sys(paint(C.green, '✓ baseline saved')); break }
+        if (r.created) { sys(paint(C.green, '✓ first scan: baseline created — future scans compare against it')); break }
+        if (!r.findings.length) sys(paint(C.green, '✓ nothing changed since the baseline'))
+        for (const f of r.findings) sys((f.level === 'high' ? paint(C.red, '▲ ') : paint(C.amber, '· ')) + pad(f.area, 11) + f.detail)
+        alerts.raise('security', r.findings.filter((f) => f.level === 'high').map((f) => f.detail).join('; ') || 'scan complete', { force: false })
+        break
+      }
+      const self = securityLib.selfCheck()
+      const gw = gateway.status()
+      sys(paint(C.dimmer, 'SECURITY'))
+      sys(' ' + pad('gateway', 12) + (gw.running ? paint(C.green, 'on') : paint(C.dimmer, 'off')) + paint(C.dimmer, ' · bind ') + gw.bind + paint(C.dimmer, ' · password ') + (gw.password ? 'hashed' : 'not set'))
+      sys(' ' + pad('audit', 12) + securityLib.recentAudit(1000).length + paint(C.dimmer, ' events · ') + securityLib.AUDIT)
+      sys(' ' + pad('self-check', 12) + (self.ok ? paint(C.green, 'no high findings') : paint(C.red, self.findings.filter((f) => f.level === 'high').length + ' high finding(s)')))
+      for (const f of self.findings.slice(0, 8)) sys('   ' + (f.level === 'high' ? paint(C.red, '▲ ') : paint(C.amber, '· ')) + pad(f.area, 10) + f.detail)
+      sys(paint(C.dimmer, '/security scan | baseline | audit [n]'))
+      break
+    }
 
     case 'quit': case 'exit': case 'q':
       return quit()
@@ -1491,21 +1849,55 @@ async function command(raw) {
     }
 
     case 'serve': {
-      const v = String(arg || '').trim()
-      if (v === 'stop') { gateway.stop(); sys(paint(C.dimmer, 'gateway stopped')); break }
-      const st = gateway.status()
-      if (v === '' ) {
-        sys('gateway ' + (st.running ? 'running on 127.0.0.1:' + st.port : 'stopped'))
-        sys(paint(C.dimmer, 'token ' + st.tokenHint + '   /serve on | stop | token'))
-        break
-      }
-      if (v === 'token') { sys(gateway.state().token); break }
-      if (v === 'on') {
+      const raw = String(arg || '').trim()
+      const sp = raw.split(/\s+/)
+      const sub = sp[0] || ''
+      const tail = sp.slice(1).join(' ').trim()
+      if (sub === 'stop') { gateway.stop(); sys(paint(C.dimmer, 'gateway stopped')); break }
+      if (sub === 'on') {
         const r = await gateway.start()
-        sys(paint(C.dimmer, r.ok ? 'gateway on 127.0.0.1:' + r.port + ' (token required)' : 'gateway failed: ' + r.error))
+        if (!r.ok) { sys(paint(C.red, 'gateway failed: ' + r.error)); break }
+        sys(paint(C.dimmer, 'gateway on 127.0.0.1:' + r.port + ' · token/pairing required'))
+        if (r.token) sys(paint(C.dimmer, 'master token (this process only): ') + r.token)
         break
       }
-      sys(paint(C.dimmer, 'usage: /serve [on|stop|token]'))
+      if (sub === 'pair') {
+        const r = gateway.requestPair(tail || 'client')
+        if (!r.ok) { sys(paint(C.red, '✗ ' + r.error)); break }
+        sys(paint(C.bright, 'pairing code ' + r.code) + paint(C.dimmer, '  · valid ' + r.expiresIn + 's · one use'))
+        sys(paint(C.dimmer, 'client: GET /pair?code=' + r.code + '   then approve here: /serve approve ' + r.code))
+        alerts.raise('ok', 'pairing code ' + r.code + ' requested', { key: 'pair' + r.code, force: true })
+        break
+      }
+      if (sub === 'approve') {
+        const r = gateway.approve(tail)
+        sys(r.ok ? paint(C.green, '✓ approved ' + r.name + ' — the client can collect its token once') : paint(C.red, '✗ ' + r.error))
+        break
+      }
+      if (sub === 'pending') {
+        const p = gateway.pending()
+        if (!p.length) { sys(paint(C.dimmer, 'no pending pairings')); break }
+        for (const x of p) sys(pad(x.name, 20) + pad(x.expiresIn + 's', 8) + (x.approved ? 'approved, waiting to collect' : 'waiting for /serve approve'))
+        break
+      }
+      if (sub === 'passwd') {
+        const pw = tail || securityLib.newToken().slice(0, 20)
+        const r = gateway.setPassword(pw)
+        if (!r.ok) { sys(paint(C.red, '✗ ' + r.error)); break }
+        sys(paint(C.green, 'gateway passphrase set — stored as a scrypt hash, never plaintext'))
+        sys(paint(C.bright, 'passphrase (shown once): ') + pw)
+        break
+      }
+      if (sub === 'token') {
+        sys(paint(C.dimmer, 'the master token is stored only as a sha256 hash; it cannot be printed after startup.'))
+        sys(paint(C.dimmer, 'use /serve pair, or set a passphrase with /serve passwd'))
+        break
+      }
+      const st = gateway.status()
+      sys('gateway ' + (st.running ? paint(C.green, 'running on 127.0.0.1:' + st.port) : paint(C.dimmer, 'stopped')))
+      sys(paint(C.dimmer, 'token ' + (st.tokenHash || '—') + ' · password ' + (st.password ? 'hashed' : 'not set') + ' · pending pairs ' + st.pending))
+      sys(paint(C.dimmer, 'pairings never travel in a URL that outlives five minutes; codes are single-use.'))
+      sys(paint(C.dimmer, '/serve on|stop|pair [name]|approve <code>|pending|passwd [pw]'))
       break
     }
 
@@ -1898,6 +2290,12 @@ async function main() {
   const oneShot = process.argv.slice(2).join(' ').trim().replace(/^["']+|["']+$/g, '')
   INTERACTIVE = !oneShot
 
+  if (process.argv.includes('--setup')) {
+    const setupMod = require(path.join(ROOT, 'lib', 'setup'))
+    const r = await setupMod.setup({ probe: !process.argv.includes('--no-probe') })
+    process.exit(r.ok ? 0 : 2)
+  }
+
   const frameOnly = process.argv.includes('--frame')
   if (frameOnly) {
     const sizeAt = process.argv.indexOf('--size')
@@ -2046,6 +2444,9 @@ async function main() {
 
   refreshHw()
   startTempPolling()
+  refreshStatus()
+  const secTimer = setInterval(refreshStatus, 10000)
+  secTimer.unref?.()
   const hwTimer = setInterval(() => { refreshHw(); if (!oneShot) scheduleRender() }, 2000)
   hwTimer.unref?.()
 
@@ -2081,6 +2482,43 @@ async function main() {
     for (const e of KEYS.parseInput(String(buf))) onEvent(e)
   })
   process.stdout.on('resize', () => { state.sel = null; state.scroll = 0; scheduleRender() })
+
+  /* The machine watching itself: a baseline of startup entries, listeners,
+   * tasks, hosts and Defender state, diffed every 10 minutes. Read-only. */
+  sentinel.watch({
+    intervalMs: 600000,
+    onFinding: (findings) => {
+      const high = findings.filter((f) => f.level === 'high')
+      if (!high.length) return
+      for (const f of high.slice(0, 4)) sys(paint(C.red, '▲ security: ' + f.detail))
+      alerts.raise('security', high.map((f) => f.detail).join('; '), { force: true })
+      scheduleRender()
+    },
+  })
+
+  /* Self-check: if the active model stops answering, say so and move on. One
+   * two-token ping every 15 minutes, skipped while busy or just after a turn. */
+  const beat = setInterval(async () => {
+    if (state.busy) return
+    const idleFor = Date.now() - (state.lastAnswer ? state.lastAnswer.at : state.started)
+    if (idleFor < 120000) return
+    const r = await bridge.selfCheck()
+    if (r.ok) return
+    sys(paint(C.amber, '⚠ heartbeat: ' + (r.model || 'model') + ' is not answering'))
+    alerts.raise('unavailable', 'heartbeat failed for ' + (r.model || 'model'), {})
+    const next = models.best([r.model])
+    if (next) {
+      bridge.settings.model = next.model
+      bridge.settings.provider = next.provider
+      state.model = next.model
+      state.provider = next.provider
+      sys(paint(C.violet, '↻ moved to ' + next.model))
+      alerts.raise('switched', 'heartbeat moved to ' + next.model, {})
+    }
+    scheduleRender()
+  }, 900000)
+  beat.unref?.()
+
   render()
 }
 

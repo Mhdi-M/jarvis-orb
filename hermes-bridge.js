@@ -2,12 +2,17 @@
 /**
  * Bridge to the Hermes Agent CLI.
  *
- * Every orb message is a real Hermes turn, so the orb inherits every tool the
+ * Every Jarvis message is a real Hermes turn, so it inherits every tool the
  * agent has: terminal, files, browser, email, cron, skills, memory.
  *
- * Conversation continuity: the first call starts a fresh Hermes session; the
- * session id is scraped from the CLI footer ("hermes --resume <id>") and saved,
- * so every later call resumes the same lineage.
+ * Continuity: the first call starts a Hermes session; later calls resume it.
+ * When the context grows past the recycle point the session is summarised by
+ * the local model and restarted, so the thread survives without paying for a
+ * 40k-token replay.
+ *
+ * Resilience: a rate limit, quota, dead model name or unreachable provider is
+ * not the end of the answer. The turn is re-run on the next model in the ranked
+ * inventory, with a handoff note so the new model continues the same thread.
  */
 const { spawn } = require('child_process')
 const fs = require('fs')
@@ -23,8 +28,16 @@ const skills = require('./lib/skills')
 const session = require('./lib/session')
 const learner = require('./lib/learner')
 const ollama = require('./lib/ollama')
+const health = require('./lib/health')
+const models = require('./lib/models')
 
-const settings = { netMode: 'direct', preferLocal: false, model: '', provider: '' }
+const settings = {
+  netMode: 'direct',
+  preferLocal: false,
+  model: '',
+  provider: '',
+  autoSwitch: process.env.JARVIS_AUTO_SWITCH !== 'off',
+}
 
 /* How many exchanges between rolling summaries, and whether to learn at all. */
 const LEARN_EVERY = Number(process.env.JARVIS_LEARN_EVERY || 1)
@@ -43,6 +56,7 @@ const SESSION_NAME = String(process.env.JARVIS_SESSION || '').trim().replace(/[^
 const STATE_FILE = SESSION_NAME && SESSION_NAME !== 'default'
   ? path.join(__dirname, 'data', 'sessions', SESSION_NAME + '.json')
   : path.join(__dirname, 'session.json')
+const HANDOFF_FILE = path.join(__dirname, 'data', 'handoff.json')
 const TIMEOUT_MS = 5 * 60 * 1000
 
 let sessionId = null
@@ -51,12 +65,32 @@ let sessionId = null
    The size is persisted with the id so a new process recycles *before* paying
    for one slow turn. */
 let lastInputTokens = 0
-const CTX_RECYCLE_AT = Number(process.env.JARVIS_CTX_LIMIT || 20000)
+const CTX_RECYCLE_AT = Number(process.env.JARVIS_CTX_LIMIT || 16000)
 try {
   const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
   if (raw && typeof raw.sessionId === 'string') sessionId = raw.sessionId
   if (raw && Number.isFinite(raw.tokens)) lastInputTokens = raw.tokens
 } catch { /* first run */ }
+
+/* A note carried across a model switch or a context recycle. It is injected
+ * into the next prompt once, then cleared, so the new session knows it is a
+ * continuation rather than a fresh conversation. */
+let handoff = ''
+try {
+  const h = JSON.parse(fs.readFileSync(HANDOFF_FILE, 'utf8'))
+  if (h && typeof h.text === 'string' && Date.now() - (h.at || 0) < 2 * 3600 * 1000) handoff = h.text
+} catch {}
+function saveHandoff(text) {
+  handoff = String(text || '').slice(0, 1200)
+  try {
+    fs.mkdirSync(path.dirname(HANDOFF_FILE), { recursive: true })
+    fs.writeFileSync(HANDOFF_FILE, JSON.stringify({ text: handoff, at: Date.now() }, null, 2))
+  } catch {}
+}
+function clearHandoff() {
+  handoff = ''
+  try { fs.unlinkSync(HANDOFF_FILE) } catch {}
+}
 
 function saveSession(id) {
   sessionId = id
@@ -87,11 +121,6 @@ function parseAnswer(raw) {
   const lines = stripAnsi(raw).replace(/\r/g, '').split('\n')
   const isBar = (l) => /^[\u2500\u2501]{5,}\s*$/.test(l.trim())
 
-  // Preferred shape:
-  //   ────────────
-  //   ☤ Hermes
-  //   <answer>
-  //   ────────────
   const marker = lines.findIndex((l) => l.includes('\u2624'))
   if (marker >= 0) {
     let end = marker + 1
@@ -100,7 +129,6 @@ function parseAnswer(raw) {
     if (body) return body
   }
 
-  // Fallback: everything after the echoed query, before the session footer.
   const q = lines.findIndex((l) => /^Query:\s/.test(l))
   if (q >= 0) {
     let body = lines.slice(q + 1).filter((l) => !isBar(l)).join('\n')
@@ -115,13 +143,11 @@ function parseAnswer(raw) {
 /** Serialise: Hermes sessions are not safe to drive concurrently. */
 let chain = Promise.resolve()
 
-/* The child currently answering, so Esc can stop it mid-flight. */
 let activeChild = null
 let cancelRequested = false
 
 function cancel() {
   if (!activeChild) {
-    // nothing running: still clear a stale flag
     cancelRequested = false
     return false
   }
@@ -130,7 +156,6 @@ function cancel() {
   return true
 }
 
-/* Questions that only need an answer, not a tool chain. Keeps latency low. */
 const HEAVY = /\b(write|build|code|refactor|fix|debug|create|make|install|compile|run|test|analy[sz]e|inspect|read|open|search|research|browse|download|upload|script|deploy|migrate|review|plan|step by step)\b/i
 
 function isFastQuery(text) {
@@ -140,8 +165,6 @@ function isFastQuery(text) {
   return !HEAVY.test(t)
 }
 
-/* The CLI emits NDJSON with --format stream-json: {"type":"text"} deltas and a
-   final {"type":"result"} carrying the whole answer plus the session id. */
 function parseJsonLine(line) {
   const t = line.trim()
   if (!t.startsWith('{') || !t.endsWith('}')) return null
@@ -151,10 +174,6 @@ function parseJsonLine(line) {
   } catch { return null }
 }
 
-/**
- * A session whose last turn was cut off is "paused" and refuses new turns.
- * Discard that turn and start clean, rather than leaving the user stuck.
- */
 function discardPausedSession(id) {
   return new Promise((resolve) => {
     if (!id) return resolve(false)
@@ -169,9 +188,19 @@ function discardPausedSession(id) {
   })
 }
 
-function spawnHermes(text, onDelta, onMeta, onTrace) {
+/* Which model this turn should start on: the explicit setting, or the best
+ * ranked model in the inventory. */
+function pickChoice() {
+  if (settings.model) return { provider: settings.provider || 'auto', model: settings.model }
+  const best = models.best()
+  if (best) return { provider: best.provider, model: best.model, id: best.id, local: best.local }
+  return { provider: settings.provider || 'auto', model: settings.model || '' }
+}
+
+function spawnHermes(text, onDelta, onMeta, onTrace, choice) {
   return new Promise((resolve) => {
     const fast = isFastQuery(text)
+    const use = choice || pickChoice()
     /* Resume pins the session's launch policy: --max-turns/--reasoning are
        rejected there, so they only ride along when starting a fresh session. */
     const args = sessionId
@@ -179,8 +208,8 @@ function spawnHermes(text, onDelta, onMeta, onTrace) {
       : ['chat', '-q', text, '--format', 'stream-json',
          '--max-turns', fast ? '4' : '12',
          ...(fast ? ['--reasoning', 'minimal'] : []),
-         ...(settings.model ? ['-m', settings.model] : []),
-         ...(settings.provider ? ['--provider', settings.provider] : [])]
+         ...(use.model ? ['-m', use.model] : []),
+         ...(use.provider ? ['--provider', use.provider] : [])]
 
     let child
     try {
@@ -218,7 +247,7 @@ function spawnHermes(text, onDelta, onMeta, onTrace) {
 
     child.stdout.on('data', (d) => {
       const chunk = d.toString()
-      out += chunk                        // raw output, for the legacy parser
+      out += chunk
       pending += chunk
       let nl
       while ((nl = pending.indexOf('\n')) !== -1) {
@@ -231,7 +260,6 @@ function spawnHermes(text, onDelta, onMeta, onTrace) {
           if (onDelta) { try { onDelta(evt.text) } catch {} }
         } else if (evt.type === 'tool_use' || evt.type === 'tool_result' ||
                    evt.type === 'thinking' || evt.type === 'reasoning' || evt.type === 'status') {
-          /* the procedure: what it is doing before the answer arrives */
           if (onTrace) { try { onTrace(evt) } catch {} }
         } else if (evt.type === 'result') {
           resultEvent = evt
@@ -295,7 +323,6 @@ async function offlineAnswer(text) {
   }
 }
 
-/** Short note so the cloud agent avoids heavy work while the PC is struggling. */
 function pressureNote() {
   const last = monitor.recent(1)[0]
   if (!last || Date.now() - last.t > 120000) return ''
@@ -303,33 +330,105 @@ function pressureNote() {
   return a.length ? `PC pressure right now (${a.join(', ')}): avoid heavy local tasks (builds, local models, big downloads); prefer lightweight or cloud approaches.` : ''
 }
 
+/** Summarise the thread, then start a clean session, carrying the note forward. */
+async function recycle(reason) {
+  let summary = ''
+  try { summary = await session.summarise('default', { timeout: 20000 }) } catch {}
+  resetSession()
+  lastInputTokens = 0
+  saveHandoff('Context was recycled (' + reason + '). Continue the same conversation; do not restart it.' +
+    (summary ? '\nSession so far:\n' + summary : ''))
+  health.note('recycle', { reason, summary: !!summary })
+  return summary
+}
+
+function buildPrompt(text, skillCtx, sessionCtx) {
+  const ctx = [memory.context(text), memory.isEnabled() ? profile.styleHint() : '', memory.isEnabled() ? profile.recentContext() : '', sessionCtx, skillCtx, pressureNote()].filter(Boolean).join('\n')
+  const head = handoff ? '[Continuity note from Jarvis itself]\n' + handoff + '\n\n' : ''
+  const body = ctx ? `[Context from Jarvis, do not mention unless relevant]\n${ctx}\n\n${text}` : text
+  return head + body
+}
+
 const NET_ERR = /(ECONN|ETIMEDOUT|ENOTFOUND|timed out|connection|network|unreachable|Could not start Hermes)/i
 
-/**
- * Routing: Hermes (cloud models + its own fallbacks) ALWAYS goes first, with or without VPN/proxy.
- * The small local model is only an emergency fallback when Hermes cannot reach any cloud model.
- */
 function ask(text, opts = {}) {
   const task = async () => {
-    if (sessionId && lastInputTokens > CTX_RECYCLE_AT) {
-      console.log(`[bridge] context at ${lastInputTokens} tokens — starting a fresh session`)
-      resetSession()
-      lastInputTokens = 0
-    }
+    if (sessionId && lastInputTokens > CTX_RECYCLE_AT) await recycle('context at ' + lastInputTokens + ' tokens')
+
     const learned = memory.learnFrom(text)
     if (memory.isEnabled()) profile.record(text)
     if (settings.preferLocal) return Object.assign(await offlineAnswer(text), learned.length ? { learned } : {})
-    /* skills Jarvis wrote for itself, when they match this request */
+
     const skillCtx = skills.toContext(text)
     const sessionCtx = session.context('default')
-    const ctx = [memory.context(text), memory.isEnabled() ? profile.styleHint() : '', memory.isEnabled() ? profile.recentContext() : '', sessionCtx, skillCtx, pressureNote()].filter(Boolean).join('\n')
-    const prompt = ctx ? `[Context from Jarvis, do not mention unless relevant]\n${ctx}\n\n${text}` : text
-    let res = await spawnHermes(prompt, opts.onDelta, opts.onMeta, opts.onTrace)
-    if (!res.ok && /chat is paused|was not sent|paused turn/i.test(res.text || '')) {
-      console.log('[bridge] session was paused — discarding the stuck turn and retrying')
-      await discardPausedSession(sessionId)
-      res = await spawnHermes(prompt, opts.onDelta, opts.onMeta)
+
+    let choice = pickChoice()
+    let res = null
+    const tried = []
+
+    for (let attempt = 0; attempt <= 2; attempt++) {
+      const prompt = buildPrompt(text, skillCtx, sessionCtx)
+      const t0 = Date.now()
+      res = await spawnHermes(prompt, opts.onDelta, opts.onMeta, opts.onTrace, choice)
+      const secs = Math.round((Date.now() - t0) / 100) / 10
+      const cls = res.ok ? null : health.classifyFailure(res.text)
+      health.recordModel({
+        provider: choice.provider, model: choice.model, ok: !!res.ok, secs: res.stopped ? undefined : secs,
+        status: res.ok ? 'ok' : res.stopped ? 'stopped' : cls.kind,
+        error: res.ok ? undefined : res.text,
+      })
+
+      if (res.ok || res.stopped) break
+      if (!settings.autoSwitch) break
+
+      /* A paused/cut turn is Hermes state, not the model: discard and retry once. */
+      if (/chat is paused|was not sent|paused turn/i.test(res.text || '')) {
+        await discardPausedSession(sessionId)
+        res = await spawnHermes(text, opts.onDelta, opts.onMeta, opts.onTrace, choice)
+        if (res.ok) break
+      }
+      if (!cls || !cls.retryable) break
+
+      if (cls.kind === 'context') {
+        await recycle('context window')
+        if (opts.onNotice) { try { opts.onNotice('limited', 'context window reached — recycled with a summary') } catch {} }
+        continue
+      }
+
+      tried.push(choice.model)
+      const next = models.best(tried)
+      if (!next || next.model === choice.model) break
+
+      /* Switching model starts a clean session: resume pins the old model. The
+         handoff note keeps the thread, which is the point. */
+      resetSession()
+      lastInputTokens = 0
+      saveHandoff('The previous model (' + (choice.model || 'unknown') + ') failed because ' + cls.plain +
+        '. You are continuing the same conversation on ' + next.model + '; do not restart it.')
+      if (opts.onSwitch) { try { opts.onSwitch(next, cls) } catch {} }
+      if (opts.onNotice) { try { opts.onNotice(cls.limited ? 'limited' : 'unavailable', (choice.model || 'model') + ' — ' + cls.plain) } catch {} }
+      choice = { provider: next.provider, model: next.model, id: next.id, local: next.local }
+      settings.model = next.model
+      settings.provider = next.provider
     }
+
+    if (!res.ok && (NET_ERR.test(res.text || '') || health.classifyFailure(res.text).limited)) {
+      /* Last resort before the offline path: the local FreeLLMAPI aggregator.
+         It has no tools, but a plain answer beats "no answer". */
+      try {
+        const direct = require('./lib/direct')
+        const d = await direct.chat([
+          { role: 'system', content: 'You are Jarvis, a concise personal assistant on the user machine. Answer directly.' },
+          { role: 'user', content: text },
+        ], { model: process.env.JARVIS_DIRECT_MODEL || 'auto' })
+        health.recordModel({ provider: 'freellmapi', model: d.model || 'auto', ok: d.ok, secs: d.secs, status: d.ok ? 'ok' : 'failed', error: d.ok ? undefined : d.error })
+        if (d.ok) {
+          res = { ok: true, text: d.text, via: 'freellmapi', model: d.model }
+          if (opts.onNotice) { try { opts.onNotice('switched', 'answered through FreeLLMAPI (' + d.model + ')') } catch {} }
+        }
+      } catch {}
+    }
+
     if (!res.ok && NET_ERR.test(res.text || '')) {
       const local = await offlineAnswer(text)
       res = local.ok ? local : { ...res, text: res.text + '\n(Local fallback also unavailable.)' }
@@ -337,13 +436,13 @@ function ask(text, opts = {}) {
     if (learned.length) res.learned = learned
 
     if (res.ok && !res.stopped) {
+      clearHandoff()
       turnCount++
       try {
         session.append('default', 'you', text)
         session.append('default', 'jarvis', res.text)
       } catch {}
 
-      /* Learning runs on the local model, off the critical path. One at a time. */
       if (turnCount % LEARN_EVERY === 0 && !pendingLearn) {
         pendingLearn = learner.learnFacts(text, res.text)
           .then((facts) => {
@@ -354,15 +453,23 @@ function ask(text, opts = {}) {
           .finally(() => { pendingLearn = null })
       }
 
-      if (turnCount % SUMMARISE_EVERY === 0) {
-        session.summarise('default').catch(() => {})
-      }
+      if (turnCount % SUMMARISE_EVERY === 0) session.summarise('default').catch(() => {})
     }
     return res
   }
   const p = chain.then(task, task)
   chain = p.catch(() => {})
   return p
+}
+
+/** One cheap probe of the model a turn would use now. */
+async function selfCheck() {
+  const choice = pickChoice()
+  const entry = models.status().find((r) => r.model === choice.model && r.provider === choice.provider) ||
+    { provider: choice.provider, model: choice.model, local: choice.local }
+  if (!entry.model) return { ok: false, error: 'no model configured' }
+  const r = await models.probe(entry, { timeout: 45000 })
+  return { ok: r.ok, model: entry.model, provider: entry.provider, secs: r.secs, text: String(r.text || '').slice(0, 120) }
 }
 
 module.exports = {
@@ -375,6 +482,9 @@ module.exports = {
   whenLearned: () => pendingLearn || Promise.resolve([]),
   resetSession,
   getSessionId: () => sessionId,
+  pickChoice,
+  selfCheck,
+  recycle,
   HERMES_EXE,
-  _internals: { parseAnswer, stripAnsi },
+  _internals: { parseAnswer, stripAnsi, buildPrompt },
 }
