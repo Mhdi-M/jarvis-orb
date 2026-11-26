@@ -65,10 +65,40 @@ so instead of hanging.
 | --- | --- |
 | Enter | send (queues if an answer is still streaming) |
 | Esc | stop the answer / clear the line |
-| Ctrl+C | stop the answer, then exit |
+| Ctrl+C | copy the highlighted text; with nothing selected it stops the answer, then exits |
+| Ctrl+X | cut the writing box to the clipboard |
+| Ctrl+V | paste text, or attach files copied in Explorer |
+| Ctrl+A / Ctrl+U / Ctrl+E | select the line / clear it / jump to the end |
 | ↑ / ↓ | walk your history |
 | Ctrl+L | redraw |
-| Ctrl+E | jump to end of line |
+| PgUp / PgDn | scroll the transcript |
+
+### Selecting text
+
+| gesture | selects |
+| --- | --- |
+| drag | any range, across lines |
+| double-click | one word (paths and URLs stay whole) |
+| triple-click | the whole answer under the pointer |
+| right-click | copies the selection |
+
+Copy puts real text on the Windows clipboard, so it pastes into VS Code, a browser
+or another terminal unchanged.
+
+### Attaching material
+
+| command | what it does |
+| --- | --- |
+| `/attach` | file picker (multi-select: images, audio, video, anything) |
+| `/attach folder` | folder picker — Jarvis lists it |
+| `/attach shot` or `/ss` | screenshot the screen and attach it |
+| `/attach voice [seconds]` or `/voice` | record the microphone and attach it |
+| `/attach list` / `/attach clear` | show or drop what is waiting |
+| drag a file into the window, or paste a path | attaches it |
+
+Attachments are read once, before the question is sent: images through the vision
+path, audio and video through faster-whisper, text files inlined, folders listed.
+A slow read gives up after 90 seconds with a note instead of freezing the prompt.
 
 ### Commands
 
