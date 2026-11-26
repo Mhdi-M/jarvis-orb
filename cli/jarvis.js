@@ -1397,10 +1397,12 @@ async function command(raw) {
     }
 
     case 'visionbench': {
-      const trials = Math.max(1, Math.min(6, Number(arg) || 3))
-      sys(paint(C.dimmer, 'measuring vision coordinates against UIA · ' + trials + ' trial(s)...'))
+      const parts = String(arg || '').trim().split(/\s+/).filter(Boolean)
+      const trials = Math.max(1, Math.min(6, Number(parts[0]) || 3))
+      const element = parts.slice(1).join(' ').trim() || 'Address and search bar'
+      sys(paint(C.dimmer, 'measuring vision coordinates against UIA · ' + trials + ' trial(s) · target "' + element + '"'))
       scheduleRender()
-      const r = await visionbench.measure({ trials, onTrial: (t) => {
+      const r = await visionbench.measure({ trials, element, onTrial: (t) => {
         sys(paint(C.dimmer, 'trial ' + t.trial + ' · ' + (t.ok ? Math.round(t.dist) + 'px off · ' + (t.inside ? 'hit' : 'miss') : t.error)))
         scheduleRender()
       } })
