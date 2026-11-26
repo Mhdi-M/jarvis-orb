@@ -57,6 +57,7 @@ const orchestra = require(path.join(ROOT, 'lib', 'orchestra'))
 const bench = require(path.join(ROOT, 'lib', 'bench'))
 const preview = require(path.join(ROOT, 'lib', 'preview'))
 const verify = require(path.join(ROOT, 'lib', 'verify'))
+const mediaAI = require(path.join(ROOT, 'lib', 'media-ai'))
 const remindersLib = { parseReminder: null, parseNote: null }
 const intentLib = { parseIntent: null }
 
@@ -1106,6 +1107,9 @@ function fetchPage(url) {
 const HELP = [
   ['/help', 'this list'],
   ['/look [question]', 'screenshot the screen and ask the vision specialist'],
+  ['/see <image> [question]', 'describe any image file (screenshot, photo, diagram)'],
+  ['/watch <youtube url>', 'fetch captions and summarize the video'],
+  ['/listen <audio|video> [model]', 'transcribe English speech locally and summarize'],
   ['/agents', 'list the agent registry: model, provider, status'],
   ['/agents run <name> <task>', 'send one task straight to one registered agent'],
   ['/cascade <task>', 'try agents in order until one answers (failover)'],
@@ -2169,6 +2173,56 @@ async function command(raw) {
       } else {
         sys(paint(C.dimmer, 'no agent answered - ' + res.attempts.map((a) => a.agent + ':' + a.status).join(', ')))
       }
+      break
+    }
+
+    case 'see': {
+      const raw = String(arg || '').trim().replace(/^["']|["']$/g, '')
+      if (!raw) { sys(paint(C.dimmer, 'usage: /see <image path> [question]')); break }
+      const sp = raw.split(/\s+/)
+      const file = sp[0].replace(/^["']|["']$/g, '')
+      const q = sp.slice(1).join(' ')
+      sys(paint(C.dimmer, 'looking at ' + file + ' …'))
+      scheduleRender()
+      const r = await mediaAI.describeImage(file, q)
+      if (!r.ok) { sys(paint(C.red, '✗ ' + r.error)); break }
+      jarvis(r.text)
+      sys(paint(C.dimmer, '· vision ' + r.secs + 's · ' + path.basename(r.file)))
+      break
+    }
+
+    case 'watch': {
+      const url = String(arg || '').trim()
+      if (!url) { sys(paint(C.dimmer, 'usage: /watch <youtube url>')); break }
+      sys(paint(C.dimmer, 'fetching captions (no video download)…'))
+      scheduleRender()
+      const t = await mediaAI.youtube(url)
+      if (!t.ok) { sys(paint(C.red, '✗ ' + t.error)); alerts.raise('unavailable', 'youtube transcript failed: ' + t.error, {}); break }
+      sys(paint(C.dimmer, t.chars + ' chars of captions (' + t.lang + ') · summarizing…'))
+      scheduleRender()
+      const prompt = 'Summarize this YouTube transcript for me. Structure: 5 short bullets of what is said, then any concrete steps or claims, then one line of bottom line. Do not invent anything that is not in the transcript.\n\n' + mediaAI.clip(t.text)
+      const res = await bridge.ask(prompt)
+      if (res.ok) { jarvis(res.text); sys(paint(C.dimmer, '· ' + (res.model || 'model') + (res.secs ? ' ' + res.secs + 's' : ''))) }
+      else sys(paint(C.red, '✗ ' + (res.text || 'summary failed')))
+      break
+    }
+
+    case 'listen': {
+      const raw = String(arg || '').trim().replace(/^["']|["']$/g, '')
+      if (!raw) { sys(paint(C.dimmer, 'usage: /listen <audio or video file> [whisper model: tiny|base|small]')); break }
+      const sp = raw.split(/\s+/)
+      const file = sp[0].replace(/^["']|["']$/g, '')
+      const model = sp[1] || ''
+      sys(paint(C.dimmer, 'transcribing ' + path.basename(file) + ' (faster-whisper, English)…'))
+      scheduleRender()
+      const t = await mediaAI.transcribe(file, model)
+      if (!t.ok) { sys(paint(C.red, '✗ ' + t.error)); break }
+      sys(paint(C.dimmer, t.chars + ' chars · ' + t.duration + 's audio · ' + t.model + ' · summarizing…'))
+      scheduleRender()
+      const prompt = 'Summarize this English audio transcript. Structure: 5 short bullets, then decisions or action items, then one line of bottom line. Do not invent anything.\n\n' + mediaAI.clip(t.text)
+      const res = await bridge.ask(prompt)
+      if (res.ok) { jarvis(res.text); sys(paint(C.dimmer, '· ' + (res.model || 'model') + (res.secs ? ' ' + res.secs + 's' : ''))) }
+      else sys(paint(C.red, '✗ ' + (res.text || 'summary failed')))
       break
     }
 

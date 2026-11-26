@@ -43,7 +43,7 @@ Last updated in a long session that hit its context limit. Read this first, then
 ## Known traps (learned the hard way)
 
 - Windows paths inside JS/Python strings: use forward slashes, or backslashes get
-  eaten (`C:UsersSource...`).
+  eaten (`C:Usersyou...`).
 - `stdio:'ignore'` kills a WinForms overlay; use piped stdio.
 - MSYS paths passed to native tools are not translated: `D:\venvs\main`, not `/d/...`.
 - pip here needs `env -u HTTPS_PROXY -u HTTP_PROXY -u ALL_PROXY` (no SOCKS support).
