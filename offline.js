@@ -15,7 +15,7 @@ const path = require('path')
 const { execFile, spawn } = require('child_process')
 
 const PROBE_HOST = process.env.JARVIS_PROBE_HOST || ''
-const PROBE_PORT = Number(process.env.JARVIS_PROBE_PORT || REDACTED_PORT)
+const PROBE_PORT = Number(process.env.JARVIS_PROBE_PORT || 443)
 const PROBE_TTL_MS = 6000
 
 let probeCache = { at: 0, online: null }
