@@ -18,7 +18,7 @@
     "cli",
     "hermes"
   ],
-  "license": "ISC",
+  "license": "MIT",
   "type": "commonjs",
   "dependencies": {
     "thinking-orbs": "^0.3.2"
