@@ -10,11 +10,39 @@ The monitoring notch is a separate tool: see `jarvis-notch`.
 
 ## Install
 
-```bash
-npm install            # first time only (no runtime dependencies beyond Hermes)
+On a fresh machine (Windows PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/Mhdi-M/jarvis-orb/main/install.ps1 | iex
 ```
 
-Put the launcher on your PATH (already done on this machine):
+or, from a checkout:
+
+```powershell
+.\install.ps1              # installs the command, (optionally) Hermes, then probes models
+.\install.ps1 -NoHermes    # keep the Hermes install manual
+```
+
+Linux / macOS / git-bash:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Mhdi-M/jarvis-orb/main/install.sh | bash
+```
+
+The installer ends with `jarvis --setup`, which discovers every provider key on
+the machine (free or paid), asks Ollama what is installed, probes each model
+with a two-token question, and writes the best working one into
+`cli.config.json`. Nothing is hard-coded to one account.
+
+From a checkout you can also run it by hand:
+
+```bash
+npm install            # first time only
+node cli/jarvis.js --setup
+node cli/jarvis.js --setup --no-probe     # detect only, no model calls
+```
+
+Put the launcher on your PATH (the installer does this already):
 
 ```cmd
 echo node ".\cli\jarvis.js" %%* > %USERPROFILE%\bin\jarvis.cmd
@@ -73,7 +101,21 @@ so instead of hanging.
 | `/summary` · `/sessions` | rolling session summary (local model) and notes on disk |
 | `/remember <fact>` · `/recall [term]` | store and search what it knows about you |
 | `/models` · `/local on\|off` | local Ollama models, answer from them only |
-| `/skill auto [name]` | let the local model write the skill |
+| `/models refresh\|all\|use <id>` | probe the inventory, switch model, enable/disable |
+| `/perf [bench]` | AI performance: availability, reliability, speed, headroom, benchmark |
+| `/auto [on\|off]` | switch model automatically on a limit or failure |
+| `/heal` | probe the current model; switch if it is down |
+| `/solve <task>` | manager loop: plan → parallel agents → validate → retry → merge |
+| `/race <task>` | same question to several agents, best validated answer wins |
+| `/orchestra [on\|off]` | route vision/calc/search/shell questions through the manager loop |
+| `/verify [cross\|off]` | answer checking: deterministic always, cross-model optional |
+| `/preview [list\|demo\|<name>]` | open a local HTML preview (design/canvas skills) |
+| `/paper <check\|run\|env> [dir] [template]` | drive paper-orchestra |
+| `/visionbench [trials]` | measure vision coordinates against UIA ground truth |
+| `/security [status\|scan\|baseline\|audit]` | self-check, change monitor, audit log |
+| `/serve [on\|stop\|pair\|approve\|passwd]` | local gateway with one-time pairing |
+| `/alerts [on\|off\|test\|recent]` | desktop notifications for limits and failures |
+| `/reflect [reset]` | distil past runs into routing preferences |
 | `/notch` | start the monitoring notch |
 | `/quit` | leave |
 
@@ -104,7 +146,32 @@ While the session runs, the right column tracks:
 - **TOKENS** — turn input/output, session totals, and how large the replayed
   context has grown
 - **HARDWARE** — CPU, RAM, GPU temperature, disk, refreshed every 2 s
+- **PERFORMANCE** — AI score from measured model/agent health, plus the
+  benchmark average when one has been run
+- **SEC** — gateway state and how many audit events are on record
 - **reminders / memory / uptime**
+
+## Reliability
+
+Three layers, each reporting instead of pretending:
+
+1. **Quality gate** — a stack trace, an HTML error page, a JSON error, an echo
+   or an empty reply is never printed as an answer.
+2. **Verification** — arithmetic in the question is recomputed locally, JSON is
+   parsed, and with `/verify cross` a second model reviews the answer. A failed
+   check is shown with the correct value.
+3. **Manager loop** (`/solve`) — plan, dispatch to specialists in parallel,
+   validate every result before using it, retry a rejected one on a different
+   agent, and merge only validated material. `/race` asks several agents the same
+   question and keeps the best validated answer.
+
+## Speed
+
+- short questions go to the **quickest healthy model**, not the strongest
+- repeated short questions are **cached for 10 minutes** (a hit costs 0.0 s)
+- skill matching is memoised for 30 s instead of re-reading every `SKILL.md`
+- the Hermes turn runs with `--max-turns 4` and minimal reasoning for short
+  questions, and only widens for work that needs tools
 
 ## Local model (Ollama)
 

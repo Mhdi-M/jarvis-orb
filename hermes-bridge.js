@@ -37,6 +37,7 @@ const settings = {
   model: '',
   provider: '',
   autoSwitch: process.env.JARVIS_AUTO_SWITCH !== 'off',
+  fastMode: process.env.JARVIS_FAST !== 'off',
 }
 
 /* How many exchanges between rolling summaries, and whether to learn at all. */
@@ -188,10 +189,14 @@ function discardPausedSession(id) {
   })
 }
 
-/* Which model this turn should start on: the explicit setting, or the best
- * ranked model in the inventory. */
-function pickChoice() {
+/* Which model this turn should start on: the explicit setting, the quickest
+ * reliable one for a short question, or the best ranked model. */
+function pickChoice(opts = {}) {
   if (settings.model) return { provider: settings.provider || 'auto', model: settings.model }
+  if (opts.fast && settings.fastMode) {
+    const quick = models.fastest()
+    if (quick) return { provider: quick.provider, model: quick.model, id: quick.id, local: quick.local }
+  }
   const best = models.best()
   if (best) return { provider: best.provider, model: best.model, id: best.id, local: best.local }
   return { provider: settings.provider || 'auto', model: settings.model || '' }
@@ -342,10 +347,30 @@ async function recycle(reason) {
   return summary
 }
 
+/* Short, repeated questions should not pay for a fresh model call. Only fast
+ * questions are cached, and only for ten minutes. */
+const replies = new Map()
+const REPLY_TTL = 10 * 60 * 1000
+const REPLY_MAX = 60
+const replyKey = (text) => String(text).trim().toLowerCase().slice(0, 500) + '\u0000' + (settings.model || 'auto')
+function replyGet(k) {
+  const h = replies.get(k)
+  if (!h) return null
+  if (Date.now() - h.at > REPLY_TTL) { replies.delete(k); return null }
+  return h.text
+}
+function replySet(k, text) {
+  replies.set(k, { text, at: Date.now() })
+  if (replies.size > REPLY_MAX) replies.delete(replies.keys().next().value)
+}
+
 function buildPrompt(text, skillCtx, sessionCtx) {
   const ctx = [memory.context(text), memory.isEnabled() ? profile.styleHint() : '', memory.isEnabled() ? profile.recentContext() : '', sessionCtx, skillCtx, pressureNote()].filter(Boolean).join('\n')
   const head = handoff ? '[Continuity note from Jarvis itself]\n' + handoff + '\n\n' : ''
-  const body = ctx ? `[Context from Jarvis, do not mention unless relevant]\n${ctx}\n\n${text}` : text
+  /* Tell the model about the preview path only when the request is visual. */
+  const visual = /\b(html|chart|diagram|graph|plot|visuali[sz]e|preview|poster|landing page|dashboard|svg)\b/i.test(text)
+  const hint = visual ? 'You can render visuals on this machine: write a self-contained .html file into data/previews/<name>.html, then tell the user to run /preview <name>.' : ''
+  const body = ctx ? `[Context from Jarvis, do not mention unless relevant]\n${ctx}${hint ? '\n' + hint : ''}\n\n${text}` : (hint ? hint + '\n\n' + text : text)
   return head + body
 }
 
@@ -359,10 +384,17 @@ function ask(text, opts = {}) {
     if (memory.isEnabled()) profile.record(text)
     if (settings.preferLocal) return Object.assign(await offlineAnswer(text), learned.length ? { learned } : {})
 
+    /* Cache first: a repeated short question should not even scan skills. */
+    const fast = isFastQuery(text)
+    if (fast) {
+      const cached = replyGet(replyKey(text))
+      if (cached) { health.note('cache', { text: String(text).slice(0, 80) }); return { ok: true, text: cached, cached: true, secs: 0 } }
+    }
+
     const skillCtx = skills.toContext(text)
     const sessionCtx = session.context('default')
 
-    let choice = pickChoice()
+    let choice = pickChoice({ fast })
     let res = null
     const tried = []
 
@@ -437,6 +469,7 @@ function ask(text, opts = {}) {
 
     if (res.ok && !res.stopped) {
       clearHandoff()
+      if (fast && res.text && res.text.length < 2000 && !res.via) replySet(replyKey(text), res.text)
       turnCount++
       try {
         session.append('default', 'you', text)

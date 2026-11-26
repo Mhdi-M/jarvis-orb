@@ -54,6 +54,9 @@ const visionbench = require(path.join(ROOT, 'lib', 'visionbench'))
 const papers = require(path.join(ROOT, 'lib', 'papers'))
 const guard = require(path.join(ROOT, 'lib', 'guard'))
 const orchestra = require(path.join(ROOT, 'lib', 'orchestra'))
+const bench = require(path.join(ROOT, 'lib', 'bench'))
+const preview = require(path.join(ROOT, 'lib', 'preview'))
+const verify = require(path.join(ROOT, 'lib', 'verify'))
 const remindersLib = { parseReminder: null, parseNote: null }
 const intentLib = { parseIntent: null }
 
@@ -609,7 +612,7 @@ function render() {
   const modelsOk = modelRows.filter((m) => m.lastOk && (!m.lastFail || m.lastOk >= m.lastFail)).length
   const agentRows = Object.values(h.agents || {})
   const agentsOk = agentRows.filter((a) => a.lastOk && (!a.lastFail || a.lastOk >= a.lastFail)).length
-  side.push(' ' + paint(C.dimmer, 'llm ') + paint(C.steel, modelsOk + '/' + modelRows.length) + paint(C.dimmer, ' · agents ') + paint(C.steel, agentsOk + '/' + agentRows.length))
+  side.push(' ' + paint(C.dimmer, 'llm ') + paint(C.steel, modelsOk + '/' + modelRows.length) + paint(C.dimmer, ' · ag ') + paint(C.steel, agentsOk + '/' + agentRows.length) + paint(C.dimmer, ' · bench ') + paint(C.steel, perf.parts && perf.parts.benchmark != null ? Math.round(perf.parts.benchmark * 100) + '%' : '—'))
   side.push(' ' + paint(C.dimmer, 'SEC ') + paint(C.steel, 'gw ' + (state.sec.gateway ? 'on' : 'off') + ' · audit ' + state.sec.audit))
   side.push(rule)
   const rem = readList(REMINDER_FILE).filter((r) => r.at > Date.now()).length
@@ -980,6 +983,17 @@ async function askAgent(text) {
       if (d.detail) sys(paint(C.dimmer, d.detail))
       const limited = verdict.kind === 'rate_limit' || verdict.kind === 'context' || verdict.kind === 'overloaded'
       alerts.raise(limited ? 'limited' : 'unavailable', (state.model || 'model') + ' — ' + d.headline.replace(/^No answer — /, ''), {})
+    } else {
+      /* The manager checks the answer: arithmetic is recomputed locally, JSON is
+       * parsed, and (opt-in) a second model can review it. */
+      const check = verify.verdict(text, res.text)
+      const cross = check.ok ? await verify.crossCheck(text, res.text) : { checked: false }
+      if (!check.ok) {
+        sys(paint(C.amber, '⚠ check failed: ' + check.reason + (check.right != null ? ' — correct value: ' + check.right : '')))
+        alerts.raise('junk', 'answer failed verification: ' + check.reason, {})
+      } else if (!cross.ok) {
+        sys(paint(C.amber, '⚠ second opinion: ' + (cross.reason || 'the other model disagrees')))
+      } else if (check.checked || cross.checked) sys(paint(C.dimmer, '✓ verified'))
     }
   } catch (e) {
     sys('✗ ' + (e && e.message ? e.message : String(e)))
@@ -1096,12 +1110,15 @@ const HELP = [
   ['/agents run <name> <task>', 'send one task straight to one registered agent'],
   ['/cascade <task>', 'try agents in order until one answers (failover)'],
   ['/solve <task>', 'manager loop: plan, parallel agents, validate, retry, merge'],
+  ['/race <task>', 'same question to several agents; best validated answer wins'],
   ['/orchestra [on|off]', 'route specialist questions through the manager loop'],
   ['/ui list|click|type', 'accessibility-first control of desktop apps'],
   ['/graph [open]', 'render the agent brain network to data/graph.html'],
   ['/serve [on|stop|pair|approve|passwd]', 'local gateway: /status /ask /bg · one-time pairing codes'],
   ['/models [refresh|all|use|on|off]', 'every reachable LLM, ranked by measured health · local included'],
-  ['/perf', 'AI performance score and the four parts behind it'],
+  ['/perf [bench]', 'AI performance: availability, reliability, speed, headroom, benchmark'],
+  ['/preview [list|demo|<name>]', 'open a local HTML preview (canva/design skills)'],
+  ['/verify [cross|off]', 'answer checking: deterministic always, cross-model optional'],
   ['/auto [on|off]', 'switch model automatically on a limit or failure'],
   ['/heal', 'probe the current model; switch if it is down'],
   ['/alerts [on|off|test|recent]', 'desktop notifications for limits and failures'],
@@ -1175,6 +1192,32 @@ async function command(raw) {
       return askOrchestra(t)
     }
 
+    case 'race': {
+      const t = String(arg || '').trim()
+      if (!t) { sys(paint(C.dimmer, 'usage: /race <task>   (same question to several agents, best validated answer wins)')); break }
+      you(t)
+      state.busy = true
+      state.busySince = Date.now()
+      const t0 = Date.now()
+      const mark3 = (m) => { if (state.trace) addLine('think', m + (state.showTiming ? '  +' + ((Date.now() - t0) / 1000).toFixed(1) + 's' : '')); scheduleRender() }
+      try {
+        const r = await orchestra.race(t, { onTrace: (e) => {
+          if (e.agent) state.agentNow = e.agent
+          if (e.phase === 'start') mark3('· ' + e.text)
+          else if (e.phase === 'agent') mark3((e.ok ? '✓ ' : '✗ ') + e.agent + ' ' + e.text)
+          else if (e.phase === 'answer') mark3((e.ok ? '✓ ' : '✗ ') + e.text)
+        } })
+        if (r.ok) {
+          jarvis(r.answer)
+          const others = r.results.filter((x) => x.agent !== r.winner.agent)
+          if (others.length) sys(paint(C.dimmer, 'compared with ' + others.map((x) => x.agent + ' ' + Math.round(x.score * 100) + '%').join(', ')))
+          state.lastAnswer = { ms: Date.now() - t0, tokIn: 0, tokOut: 0, modelMs: 0, at: Date.now() }
+        } else sys(paint(C.amber, '⚠ no valid answer — ' + r.reason))
+      } catch (e) { sys('✗ ' + e.message) }
+      finally { state.busy = false; state.busySince = 0; state.agentNow = null; scheduleRender() }
+      break
+    }
+
     case 'orchestra': {
       const v = String(arg || '').trim().toLowerCase()
       if (v === 'on' || v === 'off') state.orchestrate = v === 'on'
@@ -1229,14 +1272,57 @@ async function command(raw) {
     }
 
     case 'perf': {
+      const v = String(arg || '').trim()
+      if (v === 'bench' || v === 'bench all') {
+        sys(paint(C.dimmer, 'running the 3-task benchmark on the top models...'))
+        scheduleRender()
+        const rows = await bench.runAll({ limit: v === 'bench all' ? 6 : 3, onStep: (r) => {
+          sys(pad(r.id, 16) + pad(Math.round(r.score * 100) + '%', 6) + r.secs + 's')
+          scheduleRender()
+        } })
+        const avg = bench.latestScore()
+        sys(paint(C.green, 'benchmark average ' + (avg != null ? Math.round(avg * 100) + '%' : '—') + ' · saved to data/bench.json'))
+        refreshStatus()
+        break
+      }
       const p = health.performance({ contextTokens: state.tokens.context })
       const pct = (n) => Math.round(n * 100) + '%'
       sys(paint(C.dimmer, 'AI PERFORMANCE'))
       sys(' ' + bar(p.score, 14) + ' ' + paint(C.bright, p.score + '%') + ' ' + paint(C.steel, p.label))
-      sys(paint(C.dimmer, 'availability ') + pad(pct(p.parts.availability), 6) + paint(C.dimmer, 'reliability ') + pad(pct(p.parts.reliability), 6) + paint(C.dimmer, 'speed ') + pad(pct(p.parts.speed), 6) + paint(C.dimmer, 'context headroom ') + pct(p.parts.headroom))
+      sys(paint(C.dimmer, 'availability ') + pad(pct(p.parts.availability), 6) + paint(C.dimmer, 'reliability ') + pad(pct(p.parts.reliability), 6) + paint(C.dimmer, 'speed ') + pad(pct(p.parts.speed), 6) + paint(C.dimmer, 'headroom ') + pct(p.parts.headroom))
+      sys(paint(C.dimmer, 'benchmark ') + (p.parts.benchmark != null ? pct(p.parts.benchmark) : 'not measured — /perf bench'))
       sys(paint(C.dimmer, 'median ' + (p.medianSecs != null ? p.medianSecs + 's' : '—') + ' · ' + p.attempts + ' recorded attempt(s)'))
       const last = health.lastFailure()
       if (last) sys(paint(C.amber, 'last failure: ' + (last.key || last.agent) + ' · ' + (last.status || 'failed')))
+      break
+    }
+
+    case 'preview': {
+      const a = String(arg || '').trim()
+      if (a === 'stop') { preview.stop(); sys(paint(C.dimmer, 'preview server stopped')); break }
+      if (!a || a === 'list') {
+        const items = preview.list()
+        if (!items.length) { sys(paint(C.dimmer, 'no previews yet — /preview demo')); break }
+        for (const i of items.slice(0, 10)) sys(pad(i.name, 32) + paint(C.dimmer, new Date(i.at).toLocaleString()))
+        sys(paint(C.dimmer, '/preview <name> to open one'))
+        break
+      }
+      if (a === 'demo') {
+        const d = preview.demo()
+        const r = await preview.show(d.file)
+        sys(r.ok ? paint(C.green, '✓ opened ' + r.url) : paint(C.red, '✗ ' + r.error))
+        break
+      }
+      const r = await preview.show(a)
+      sys(r.ok ? paint(C.green, '✓ opening ' + r.url) : paint(C.red, '✗ ' + r.error))
+      break
+    }
+
+    case 'verify': {
+      const v = String(arg || '').trim().toLowerCase()
+      if (v === 'cross' || v === 'on') process.env.JARVIS_VERIFY = 'cross'
+      else if (v === 'off') delete process.env.JARVIS_VERIFY
+      sys(paint(C.dimmer, 'verification: deterministic checks always on' + (verify.crossEnabled() ? ' + cross-model second opinion' : ' · /verify cross for a second model')))
       break
     }
 

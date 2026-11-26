@@ -23,17 +23,21 @@ Last updated in a long session that hit its context limit. Read this first, then
 
 ## Open items, in order
 
-1. **Vision-path ground truth** — `lib/visionact.js` exists (UIA first, vision
-   fallback). Unmeasured: how accurate the vision coordinates are. Target a
-   control whose box UIA reports, ask vision for it, compare centres.
-2. **Pairing flow in the gateway** — currently token-only. Add one-time codes:
-   client requests, user runs `/serve approve <code>`.
-3. **`/reflect`** — distil `data/team-lessons.json` into a preferences file that
-   is injected into agent prompts (the "gets better with use" loop).
-4. **paper-orchestra wiring** — deps installing into `~/venvs/main`. Then either
-   add an agent `papers` with toolset `terminal` that drives
-   `paper_writing_cli.py`, or a `/paper` command. Needs model keys before it runs.
-5. **Window focus** — verified once (AppActivate -> "Meet - ..."), keep an eye on
+1. **Vision-path ground truth** — `lib/visionbench.js` benches UIA against the
+   vision model. Last run: the bench works, but the window lookup needs the
+   Chrome title on this desktop (`no window matching 'chrome'`); measure once the
+   title is stable.
+2. **FreeLLMAPI as a Hermes provider** — the app is installed, paired and 87
+   models are visible on `127.0.0.1:31415`; the only working upstream is the
+   custom DeepSeek endpoint. Hermes needs `custom_providers.freellm` added by
+   hand (the agent is not allowed to edit `config.yaml`).
+3. **Vision accuracy numbers** — run `/visionbench 3` with a stable Chrome
+   window and record hit-rate and median px in `data/vision-accuracy.json`.
+4. **NVIDIA / Google keys inside FreeLLMAPI** — the app's validator returns 403
+   for both even though Hermes uses them; add Groq/Cerebras/Mistral in the app.
+5. **Paper run** — `/paper check` passes; a full generation has not been run
+   (needs raw materials, figures, and hours).
+6. **Window focus** — verified once (AppActivate → "Meet - ..."), keep an eye on
    it after Chrome updates.
 
 ## Known traps (learned the hard way)
