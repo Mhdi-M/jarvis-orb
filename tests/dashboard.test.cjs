@@ -7,7 +7,7 @@ const os = require('node:os')
 const path = require('node:path')
 const http = require('node:http')
 
-const scratch = fs.mkdtempSync(path.join('C:/Users/you/AppData/Local/hermes/cache/scratch/', 'jarvis-dashboard-'))
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'jarvis-dashboard-'))
 process.env.JARVIS_CALENDAR_FILE = path.join(scratch, 'calendar.json')
 const dashboard = require('../lib/dashboard.js')
 
