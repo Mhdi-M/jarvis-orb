@@ -23,8 +23,8 @@ notch.v1.bak
 
 # stale UI snapshots
 *.pre-*.html
-.en.srt
-.en.vtt
+*.en.srt
+*.en.vtt
 
 # local reference material and one-off dev scripts (never publish)
 docs/local/
