@@ -14,6 +14,17 @@ import sys
 # Use a mirror if the official hub is unreachable
 os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
 
+# Monkey-patch PyAV to accept the metadata_errors kwarg (older/newer PyAV may not have it)
+try:
+    import av
+    _orig_open = av.open
+    def _patched_open(*args, **kwargs):
+        kwargs.pop('metadata_errors', None)
+        return _orig_open(*args, **kwargs)
+    av.open = _patched_open
+except Exception:
+    pass
+
 
 def main() -> int:
     if len(sys.argv) < 2:
