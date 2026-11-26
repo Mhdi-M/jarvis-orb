@@ -2,13 +2,17 @@
 
     python transcribe.py <file> [model-size]
 
-Model sizes: tiny, base, small, medium, large-v3. Default base (about 74 MB,
+Model sizes: tiny, base, small, medium, large-v3. Default tiny (about 39 MB,
 CPU, int8). The model is cached under JARVIS_MODELS (default
 D:/Programs/jarvis-tools/models) so it is downloaded once.
+Uses hf-mirror.com as a fallback endpoint when the official HF hub is unreachable.
 """
 import json
 import os
 import sys
+
+# Use a mirror if the official hub is unreachable
+os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
 
 
 def main() -> int:
@@ -16,7 +20,7 @@ def main() -> int:
         print(json.dumps({"ok": False, "error": "usage: transcribe.py <file> [model]"}))
         return 2
     path = sys.argv[1]
-    size = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("JARVIS_WHISPER_MODEL", "base")
+    size = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("JARVIS_WHISPER_MODEL", "tiny")
     if not os.path.isfile(path):
         print(json.dumps({"ok": False, "error": "no such file: %s" % path}))
         return 2
