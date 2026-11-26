@@ -303,6 +303,22 @@ function parseStorageTemp(text) {
   return null
 }
 
+/** Names of DirectShow audio capture devices, via ffmpeg. Empty when none. */
+function dshowAudio() {
+  return new Promise((resolve) => {
+    execFile('ffmpeg', ['-hide_banner', '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'],
+      { windowsHide: true, timeout: 8000 }, (err, stdout, stderr) => {
+        const text = String(stderr || '') + String(stdout || '')
+        const names = []
+        for (const line of text.split(/\r?\n/)) {
+          const m = line.match(/"([^"]+)"\s+\(audio\)/)
+          if (m && !names.includes(m[1])) names.push(m[1])
+        }
+        resolve(names)
+      })
+  })
+}
+
 const cpuSample = sampler()
 let hwCache = { gpuTemp: null, gpuName: '', gpuUtil: null, cpuTemp: null, diskTemp: null }
 
@@ -2027,7 +2043,7 @@ async function command(raw) {
       if (!url) { sys(paint(C.dimmer, 'usage: /browse <url>   (drives your own Chrome over CDP)')); break }
       sys(paint(C.dimmer, 'opening in your Chrome...'))
       scheduleRender()
-      const py = process.env.JARVIS_PY || 'python'
+      const py = require('../lib/py').python()
       const script = path.join(ROOT, 'tools', 'browse.py')
       const env2 = Object.assign({}, process.env)
       delete env2.HTTPS_PROXY; delete env2.HTTP_PROXY; delete env2.ALL_PROXY
@@ -2229,7 +2245,9 @@ async function command(raw) {
 
     case 'record': {
       const secs = Math.max(1, Math.min(300, Number(arg) || 5))
-      const mic = 'default'
+      const devices = await dshowAudio()
+      const mic = process.env.JARVIS_MIC || devices[0] || ''
+      if (!mic) { sys(paint(C.red, '✗ no microphone found (ffmpeg -list_devices -f dshow)')); break }
       const wavPath = path.join(os.tmpdir(), 'jarvis-record-' + Date.now() + '.wav')
       sys(paint(C.dimmer, 'recording ' + secs + 's from microphone…'))
       scheduleRender()

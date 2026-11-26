@@ -45,7 +45,7 @@ Last updated in a long session that hit its context limit. Read this first, then
 - Windows paths inside JS/Python strings: use forward slashes, or backslashes get
   eaten (`C:Usersyou...`).
 - `stdio:'ignore'` kills a WinForms overlay; use piped stdio.
-- MSYS paths passed to native tools are not translated: `D:\venvs\main`, not `/d/...`.
+- MSYS paths passed to native tools are not translated: `C:\venvs\main`, not `/c/...`.
 - pip here needs `env -u HTTPS_PROXY -u HTTP_PROXY -u ALL_PROXY` (no SOCKS support).
 - `powercfg /list` hides OEM schemes (Turbo) while another plan is active — switch
   back by GUID `6fecc5ae-f350-48a5-b669-b472cb895ccf`.

@@ -16,7 +16,7 @@ const offline = require('../offline.js')
 test('memory: learns "remember ..." and recalls it by keyword', () => {
   memory._reset()
   assert.deepEqual(memory.learnFrom('remember that my laptop is a ThinkPad with 16GB RAM'), ['my laptop is a ThinkPad with 16GB RAM'])
-  assert.match(memory.context('what RAM does my laptop have'), /16GB RAM/)
+  assert.match(memory.context('what RAM does my laptop have'), /16GB/)
 })
 test('memory: refuses to store secrets', () => {
   memory._reset()

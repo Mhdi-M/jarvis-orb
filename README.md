@@ -45,7 +45,7 @@ node cli/jarvis.js --setup --no-probe     # detect only, no model calls
 Put the launcher on your PATH (the installer does this already):
 
 ```cmd
-echo node ".\cli\jarvis.js" %%* > %USERPROFILE%\bin\jarvis.cmd
+echo node "%~dp0cli\jarvis.js" %%* > %USERPROFILE%\bin\jarvis.cmd
 ```
 
 ## Use
