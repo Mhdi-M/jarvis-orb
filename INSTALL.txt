@@ -1,0 +1,256 @@
+JARVIS — INSTALLATION AND COMMAND GUIDE
+=======================================
+
+A terminal assistant for Windows/macOS/Linux, backed by the Hermes Agent.
+Everything it knows is local: data/ is never committed and never leaves the PC.
+
+
+1. WHAT YOU NEED
+----------------
+- Node.js 20 or newer          https://nodejs.org
+- git                          https://git-scm.com
+- Hermes Agent (optional but recommended) — Jarvis drives it for tool work:
+    https://hermes-agent.nousresearch.com
+- Optional: Ollama            https://ollama.com   (offline local model)
+- Optional: FreeLLMAPI        https://github.com/tashfeenahmed/freellmapi
+                               (87 free providers behind one local endpoint)
+
+No API key is required to install. Jarvis discovers whatever keys already exist
+on the machine and ranks the models it can actually reach.
+
+
+2. INSTALL — WINDOWS (one line)
+-------------------------------
+Open PowerShell and run:
+
+    irm https://raw.githubusercontent.com/Mhdi-M/jarvis-orb/main/install.ps1 | iex
+
+The installer:
+  - clones the repo into %LOCALAPPDATA%\jarvis
+  - adds a `jarvis` command to your PATH
+  - installs Hermes if it is missing (skip with -NoHermes)
+  - runs `jarvis --setup`, which probes the models and picks the best one
+
+Options:
+
+    .\install.ps1 -NoHermes        do not install Hermes
+    .\install.ps1 -NoProbe         detect models but make no test calls
+    .\install.ps1 -Dir D:\tools\jarvis
+
+After it finishes, open a NEW terminal and type:
+
+    jarvis
+
+
+3. INSTALL — MANUAL (any OS)
+----------------------------
+    git clone https://github.com/Mhdi-M/jarvis-orb.git
+    cd jarvis-orb
+    npm install
+    node cli/jarvis.js --setup
+
+Add a launcher yourself:
+
+  Windows (jarvis.cmd):
+    @echo off
+    node "C:\path\to\jarvis-orb\cli\jarvis.js" %*
+
+  Linux / macOS (~/.local/bin/jarvis):
+    #!/usr/bin/env bash
+    exec node "/path/to/jarvis-orb/cli/jarvis.js" "$@"
+
+    chmod +x ~/.local/bin/jarvis
+
+
+4. LINUX / macOS / GIT-BASH (one line)
+--------------------------------------
+    curl -fsSL https://raw.githubusercontent.com/Mhdi-M/jarvis-orb/main/install.sh | bash
+
+Environment overrides: JARVIS_DIR, JARVIS_BIN, JARVIS_NO_HERMES=1,
+JARVIS_NO_PROBE=1.
+
+
+5. FIRST RUN
+------------
+    jarvis                      interactive session
+    jarvis "what is 42*7"       one question, print the answer, exit
+    jarvis --frame              render one frame and exit (layout check)
+    jarvis --setup              detect keys, probe models, pick the best
+    jarvis --setup --no-probe   detect only, no model calls
+
+The sidebar shows: model, provider, current agent, tokens, CPU/RAM/GPU/disk,
+AI PERFORMANCE (measured) and SECURITY (gateway + audit count).
+
+
+6. KEYS (optional)
+------------------
+Put keys in %LOCALAPPDATA%\hermes\.env (Windows) or ~/.hermes/.env:
+
+    NVIDIA_API_KEY=...
+    GOOGLE_API_KEY=...
+    DEEPSEEK_API_KEY=...
+    OPENROUTER_API_KEY=...
+    FREELMAPI_KEY=...          (client key from the FreeLLMAPI app)
+
+Then:
+
+    jarvis --setup
+
+Keys are read by Hermes; Jarvis never prints them, and every log/transcript line
+is passed through a redactor before it is written.
+
+
+7. FREELMAPI (optional local router)
+------------------------------------
+1. Install the app: https://github.com/tashfeenahmed/freellmapi
+2. Open it; it listens on http://127.0.0.1:31415
+3. Create a client key, then save it as FREELMAPI_KEY in the Hermes .env
+4. Add provider keys inside the app. **Google AI Studio, Groq and Mistral are
+   confirmed healthy on this machine.** Cerebras is paid-only — skip it.
+   Other free options that usually validate: OpenRouter (`:free` models),
+   Cloudflare Workers AI, Hugging Face Router, GitHub Models.
+   NVIDIA keys are rejected by the app's validator (HTTP 403) even though they
+   work through Hermes directly; leave them out of the app.
+5. In Jarvis: /models refresh
+
+Jarvis uses it two ways:
+  - first choice for short questions (about 1-2 s, no Hermes session)
+  - last-resort answer path when every cloud provider is rate-limited
+
+To make it a FULL Hermes provider (tools included), add this to
+%LOCALAPPDATA%\hermes\config.yaml under custom_providers: — Hermes blocks agents
+from editing that file, so it is a manual step:
+
+    - name: freellm
+      base_url: http://127.0.0.1:31415/v1
+      key_env: FREELMAPI_KEY
+      model: deepseek/deepseek-v4-flash
+      models:
+        deepseek/deepseek-v4-flash: {}
+        deepseek/deepseek-flash: {}
+      models_discovered: true
+
+Verify:
+
+    hermes -z "Reply with exactly: OK" -m deepseek/deepseek-v4-flash --provider custom:freellm
+
+
+8. COMMANDS
+-----------
+Core
+    /help                         this list
+    /model [name]                 show or set the model
+    /agent [cloud|local|provider] where answers come from
+    /new                          fresh conversation
+    /clear                        wipe the transcript (memory kept)
+    /tokens                       token usage
+    /summary · /sessions          rolling summary, session notes on disk
+
+Models and speed
+    /models                       ranked inventory (free, paid, local)
+    /models refresh | all         probe stale / every model
+    /models use <id>              switch to one model
+    /models on|off <id>           enable or disable an entry
+    /perf                         performance breakdown
+    /perf bench                   run the 3-task benchmark
+    /auto [on|off]                auto-switch on a limit or failure
+    /heal                         probe the current model, switch if down
+    /local on|off                 answer from Ollama only
+
+Reliability
+    /solve <task>                 plan → parallel agents → validate → retry → merge
+    /race <task>                  same question to several agents, best wins
+    /orchestra [on|off]           route vision/calc/search/shell tasks through the loop
+    /verify [cross|off]           answer checking (arithmetic, JSON, second model)
+    /reflect [reset]              learn routing preferences from past runs
+    /cascade <task>               try agents in order until one answers
+
+Desktop and web
+    /ui list|click|type           accessibility-first app control
+    /browse <url>                 open in your own Chrome (CDP)
+    /tabs · /tab <n> · /chrome    Chrome tabs, read one, launch CDP Chrome
+    /takeover <task>              let Jarvis drive mouse and keyboard
+    /look [question]              screenshot and ask the vision specialist
+    /visionbench [trials] [target] measure vision accuracy against UIA
+    /graph [open]                 agent brain graph
+    /ctl status|volume|power|lock control the machine
+    /sys · /hw                    system and hardware snapshot
+
+Visual output
+    /preview list                 HTML previews on disk
+    /preview demo                 chart from live performance data
+    /preview <name>               open one in the browser
+    /paper check|run|env [dir]    paper-orchestra (LaTeX paper writer)
+
+Files, notes, time
+    /open · /run · /read · /ls · /cat
+    /remind <in 10 min|at 18:30> <text> · /reminders
+    /note <text> · /notes
+    /remember <fact> · /recall [term] · /memory · /forget <text>
+    /profile                      what it learned about your style
+    /skills · /skill save|auto|show|rm
+
+Gateway and security
+    /serve on|stop                local gateway (loopback only)
+    /serve pair [name]            one-time pairing code
+    /serve approve <code>         approve a client
+    /serve passwd [pw]            set a passphrase (stored as scrypt hash)
+    /security status|scan|baseline|audit
+    /alerts on|off|test|recent
+
+Housekeeping
+    /yes · /no                    approve or cancel a held risky action
+    /quit
+
+
+9. SAFETY AND PRIVACY
+---------------------
+- data/ is git-ignored and never committed: memory, sessions, health, keys.
+- Provider keys live in the Hermes .env, not in this repo.
+- The gateway binds to 127.0.0.1 only; its token is stored as a SHA-256 hash.
+- Passphrases are stored with scrypt, never plaintext.
+- Shell commands that delete, install, change the firewall, create accounts or
+  run encoded PowerShell are held until you type /yes.
+- /security scan compares startup entries, listeners, scheduled tasks, hosts and
+  Defender state against a baseline; it is read-only.
+- Every answer goes through a quality gate and a correctness check; a rejected
+  answer is shown as a rejection, never as fact.
+
+
+10. TESTS
+---------
+    npm test          unit tests (189)
+    npm run stress    hot-path stress harness
+
+
+11. TROUBLESHOOTING
+-------------------
+"jarvis needs an interactive terminal"
+    Run it in a real terminal window, or use: jarvis "question"
+
+"no model works"
+    jarvis --setup            then   /models
+    Check keys in %LOCALAPPDATA%\hermes\.env
+
+"gateway failed: EADDRINUSE"
+    Something already listens on the port. /serve stop, or change "port" in
+    data/gateway.json.
+
+"vision bench: no window matching 'chrome'"
+    Open a Chrome window first, and pass a visible label:
+    /visionbench 3 JARVIS BENCH TARGET
+
+"Hermes took longer than 5 minutes"
+    Narrow the question or use /bg <task> to run it in the background.
+
+FreeLLMAPI answers become 429
+    The app has marked models rate-limited. Add more provider keys in the app,
+    or wait for the cooldown.
+
+
+12. LINKS
+---------
+Repository:  https://github.com/Mhdi-M/jarvis-orb
+Hermes:      https://hermes-agent.nousresearch.com
+FreeLLMAPI:  https://github.com/tashfeenahmed/freellmapi
+Ollama:      https://ollama.com

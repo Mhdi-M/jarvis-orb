@@ -38,6 +38,7 @@ const settings = {
   provider: '',
   autoSwitch: process.env.JARVIS_AUTO_SWITCH !== 'off',
   fastMode: process.env.JARVIS_FAST !== 'off',
+  directFirst: process.env.JARVIS_DIRECT_FIRST !== 'off',
 }
 
 /* How many exchanges between rolling summaries, and whether to learn at all. */
@@ -46,9 +47,7 @@ const SUMMARISE_EVERY = Number(process.env.JARVIS_SUMMARISE_EVERY || 6)
 let turnCount = 0
 let pendingLearn = null
 
-const HERMES_EXE =
-  process.env.JARVIS_HERMES_EXE ||
-  'C:\\Users\\Source\\AppData\\Local\\hermes\\hermes-agent\\.hermes\\bin\\hermes.exe'
+const HERMES_EXE = process.env.JARVIS_HERMES_EXE || require('./lib/hermes-bin').hermesBin()
 
 /* One session file per instance. Two Jarvis processes used to share
  * session.json, so a background question and an interactive one clobbered each
@@ -389,6 +388,25 @@ function ask(text, opts = {}) {
     if (fast) {
       const cached = replyGet(replyKey(text))
       if (cached) { health.note('cache', { text: String(text).slice(0, 80) }); return { ok: true, text: cached, cached: true, secs: 0 } }
+    }
+
+    /* Short question: the local FreeLLMAPI router answers in about a second and
+     * needs no Hermes session. Tool work still goes through Hermes below. */
+    if (fast && settings.directFirst) {
+      try {
+        const direct = require('./lib/direct')
+        if (direct.config()) {
+          const d = await direct.chat([
+            { role: 'system', content: 'You are Jarvis, a concise personal assistant on the user machine. Answer directly and briefly.' },
+            { role: 'user', content: text },
+          ], { model: process.env.JARVIS_DIRECT_MODEL || 'auto', maxTokens: 600 })
+          health.recordModel({ provider: 'freellmapi', model: d.model || 'auto', ok: d.ok, secs: d.secs, status: d.ok ? 'ok' : 'failed', error: d.ok ? undefined : d.error })
+          if (d.ok) {
+            replySet(replyKey(text), d.text)
+            return { ok: true, text: d.text, via: 'freellmapi', model: d.model, secs: d.secs }
+          }
+        }
+      } catch {}
     }
 
     const skillCtx = skills.toContext(text)

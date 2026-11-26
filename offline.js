@@ -14,7 +14,7 @@ const os = require('os')
 const path = require('path')
 const { execFile, spawn } = require('child_process')
 
-const PROBE_HOST = process.env.JARVIS_PROBE_HOST || 'REDACTED_PROVIDER_HOST'
+const PROBE_HOST = process.env.JARVIS_PROBE_HOST || ''
 const PROBE_PORT = Number(process.env.JARVIS_PROBE_PORT || REDACTED_PORT)
 const PROBE_TTL_MS = 6000
 
@@ -34,6 +34,7 @@ function probeOnce() {
     sock.once('connect', () => finish(true))
     sock.once('timeout', () => finish(false))
     sock.once('error', () => finish(false))
+    if (!PROBE_HOST) return finish(true) // no probe host configured: assume online
     try { sock.connect(PROBE_PORT, PROBE_HOST) } catch { finish(false) }
   })
 }

@@ -8,7 +8,7 @@ const id = process.argv[2]
 const task = process.argv.slice(3).join(' ')
 const ROOT = path.join(__dirname, '..')
 const DIR = path.join(ROOT, 'data', 'bg')
-const HERMES = process.env.HERMES_BIN || 'C:/Users/you/AppData/Local/hermes/hermes-agent/.hermes/bin/hermes.exe'
+const HERMES = process.env.HERMES_BIN || require('../lib/hermes-bin').hermesBin()
 
 function finish(code, note) {
   const meta = path.join(DIR, id + '.json')
